@@ -14,16 +14,20 @@
 # tmux exposes the exact cursor row (`display-message '#{cursor_y}'` +
 # single-row `capture-pane -e -S cy -E cy`); zellij has no cursor-row query in
 # its CLI, so this lib dumps the pane viewport WITH styling
-# (`zellij action dump-screen -a --pane-id P`) and classifies the LAST non-blank
-# line as the composer proxy. The dim/border stripping and the empty/pending
-# verdicts are otherwise identical to fm-tmux-lib.sh so the two backends behave
-# the same to callers; the single deliberate difference is which line is read.
-# This last-line heuristic is the one piece the empirical smoke test
+# (`zellij action dump-screen -a --pane-id P`) and scans the last few non-blank
+# lines from the BOTTOM up for the composer input row: it skips pure
+# border/whitespace lines and idle keyboard/submit-hint lines a harness may draw
+# below the input row, so the first genuine line decides the verdict. The
+# dim/border stripping and the empty/pending verdicts are otherwise identical to
+# fm-tmux-lib.sh so the two backends behave the same to callers; the deliberate
+# difference is the line source (a small bottom window vs the tmux cursor row).
+# This bottom-window heuristic is the one piece the empirical smoke test
 # (tests/fm-backend-zellij-smoke.test.sh) exists to keep honest.
 #
 # Per-harness override: FM_COMPOSER_IDLE_RE matches an empty composer after
-# dim-ghost and structural border stripping. FM_BUSY_REGEX overrides the busy
-# footer set (mirrors fm-watch.sh / fm-tmux-lib.sh).
+# dim-ghost and structural border stripping; FM_ZELLIJ_HINT_RE overrides the
+# idle hint/footer line set that is skipped while scanning; FM_BUSY_REGEX
+# overrides the busy footer set (mirrors fm-watch.sh / fm-tmux-lib.sh).
 #
 # All functions are `set -u` and `set -e` safe (guarded zellij calls, explicit
 # returns) so they can be sourced into either context.
@@ -115,51 +119,98 @@ fm_zellij_strip_ghost() {
   '
 }
 
-# fm_zellij_last_composer_line: the LAST non-blank line of the pane's styled
-# viewport, with dim ghost text removed and escapes stripped. This is the zellij
-# stand-in for tmux's exact cursor-row read: for every verified harness the
-# bottom-most non-blank rendered line is the composer input row (or, mid-turn,
-# the busy footer that classification already treats as empty). Prints the plain
-# line (may be empty); returns 1 only when the pane could not be dumped at all.
-fm_zellij_last_composer_line() {  # <target>
+# Idle hint/footer lines a harness may render BELOW the input row (or inside the
+# composer box) while idle: keyboard-shortcut hints and submit hints. These are
+# NOT pending input, so composer classification skips them and keeps scanning up
+# for the real input row. Override per-harness with FM_ZELLIJ_HINT_RE. Kept
+# footer-shaped (submit glyphs ↵/⏎, "shortcuts", "to send") rather than matching
+# a bare word like "send" so genuinely typed text is never swallowed as a hint.
+FM_ZELLIJ_HINT_RE_DEFAULT='\? *for *shortcuts|shortcuts|↵|⏎|to send'
+
+# fm_zellij_composer_lines: the last few (<=5) non-blank lines of the pane's
+# styled viewport, oldest-first, with dim ghost text removed and escapes
+# stripped. This is the zellij stand-in for tmux's exact cursor-row read: the
+# composer input row is the bottom-most REAL line, but a harness may draw a
+# bottom border, a keyboard-hint, or a submit-hint below it, so classification
+# needs a small window of lines rather than only the last one. Prints the plain
+# lines (each may be empty); returns 1 only when the pane could not be dumped.
+fm_zellij_composer_lines() {  # <target>
   local target=$1 pane raw
   pane=$(fm_zellij_pane_of_target "$target")
   raw=$(fm_zellij_action dump-screen -a -p "$pane" 2>/dev/null) || return 1
-  printf '%s\n' "$raw" | fm_zellij_strip_ghost | grep -v '^[[:space:]]*$' | tail -1
+  printf '%s\n' "$raw" | fm_zellij_strip_ghost | grep -v '^[[:space:]]*$' | tail -5
 }
 
-# fm_zellij_composer_state: classify the composer line of <target> as
-#   empty   - no pending input (blank, a bare prompt, a busy footer, or only dim
-#             ghost text). Safe to inject; also the positive submit ack.
-#   pending - real unsubmitted text (a human mid-typing, or a swallowed Enter).
-#   unknown - the pane could not be read.
-# Mirrors fm-tmux-lib.sh's fm_tmux_composer_state verdicts exactly; only the
-# line source differs (last non-blank viewport line vs the tmux cursor row).
-fm_zellij_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 line stripped
-  line=$(fm_zellij_last_composer_line "$target") || { printf 'unknown'; return 0; }
-  # Strip the composer box borders (literal glyphs — no character classes).
+# fm_zellij_strip_composer_borders: drop the composer box border glyphs from one
+# line and trim surrounding whitespace. Strips BOTH vertical borders (│ ┃ |) and
+# horizontal/corner glyphs (─ ━ and the light/heavy box corners), so a bottom
+# border line like "╰────╯" collapses to empty rather than reading as pending.
+fm_zellij_strip_composer_borders() {  # reads a line on stdin, prints stripped
+  local line stripped
+  IFS= read -r line || true
   stripped=${line//│/}      # U+2502 light vertical (claude)
   stripped=${stripped//┃/}  # U+2503 heavy vertical
   stripped=${stripped//|/}  # ASCII pipe
+  stripped=${stripped//─/}  # U+2500 light horizontal
+  stripped=${stripped//━/}  # U+2501 heavy horizontal
+  stripped=${stripped//╭/}; stripped=${stripped//╮/}   # light rounded corners
+  stripped=${stripped//╰/}; stripped=${stripped//╯/}
+  stripped=${stripped//┌/}; stripped=${stripped//┐/}   # light square corners
+  stripped=${stripped//└/}; stripped=${stripped//┘/}
+  stripped=${stripped//┏/}; stripped=${stripped//┓/}   # heavy corners
+  stripped=${stripped//┗/}; stripped=${stripped//┛/}
   # Trim surrounding whitespace.
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  # Nothing left = empty composer.
-  [ -n "$stripped" ] || { printf 'empty'; return 0; }
-  if [ -n "${FM_COMPOSER_IDLE_RE:-}" ] \
-     && printf '%s' "$stripped" | grep -qiE "$FM_COMPOSER_IDLE_RE"; then
-    printf 'empty'; return 0
-  fi
-  # Just a bare prompt glyph = empty composer (idle).
-  case "$stripped" in
-    '>'|'❯'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-  esac
-  # A busy footer landing on the last line is not pending input.
-  if printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_ZELLIJ_BUSY_REGEX_DEFAULT}"; then
-    printf 'empty'; return 0
-  fi
-  printf 'pending'; return 0
+  printf '%s' "$stripped"
+}
+
+# fm_zellij_composer_state: classify the composer of <target> as
+#   empty   - no pending input (blank, a bare prompt, a busy footer, an idle
+#             hint/footer line, or only dim ghost text). Safe to inject; also the
+#             positive submit ack.
+#   pending - real unsubmitted text (a human mid-typing, or a swallowed Enter).
+#   unknown - the pane could not be read.
+# Scans the last few non-blank lines from the BOTTOM up so a bottom border, a
+# keyboard-hint, or a submit-hint rendered below the input row does not
+# masquerade as pending input. Skips pure border/whitespace and idle hint lines;
+# the first genuine line decides the verdict. Mirrors fm-tmux-lib.sh's
+# fm_tmux_composer_state verdicts exactly; only the line source differs (a small
+# bottom window of the viewport vs the tmux cursor row).
+fm_zellij_composer_state() {  # <target> -> empty|pending|unknown
+  local target=$1 lines rev line stripped
+  lines=$(fm_zellij_composer_lines "$target") || { printf 'unknown'; return 0; }
+  # Reverse the small window so we walk from the bottom (input row side) upward;
+  # tac on GNU systems, tail -r on BSD, the lines as-is if neither exists.
+  rev=$(printf '%s\n' "$lines" | tac 2>/dev/null) \
+    || rev=$(printf '%s\n' "$lines" | tail -r 2>/dev/null) \
+    || rev=$lines
+  while IFS= read -r line; do
+    stripped=$(printf '%s' "$line" | fm_zellij_strip_composer_borders)
+    # Pure border/whitespace line: not the input row, keep scanning up.
+    [ -n "$stripped" ] || continue
+    # A busy footer means an agent is mid-turn: composer is idle, not pending.
+    if printf '%s' "$stripped" | grep -qiE "${FM_BUSY_REGEX:-$FM_ZELLIJ_BUSY_REGEX_DEFAULT}"; then
+      printf 'empty'; return 0
+    fi
+    # A per-harness idle-composer marker.
+    if [ -n "${FM_COMPOSER_IDLE_RE:-}" ] \
+       && printf '%s' "$stripped" | grep -qiE "$FM_COMPOSER_IDLE_RE"; then
+      printf 'empty'; return 0
+    fi
+    # Just a bare prompt glyph = empty composer (idle).
+    case "$stripped" in
+      '>'|'❯'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+    esac
+    # An idle hint/footer line below the input row: skip, keep scanning up.
+    if printf '%s' "$stripped" | grep -qiE "${FM_ZELLIJ_HINT_RE:-$FM_ZELLIJ_HINT_RE_DEFAULT}"; then
+      continue
+    fi
+    # A genuine, non-hint, non-bare-prompt line: real unsubmitted input.
+    printf 'pending'; return 0
+  done <<< "$rev"
+  # Only border/whitespace and hint lines were present = empty composer.
+  printf 'empty'; return 0
 }
 
 # fm_zellij_pane_input_pending: 0 (pending) iff the composer holds real

@@ -68,12 +68,16 @@ fm_backend_zellij_preflight() {
 # selector that is neither "session:pane" nor a bare "fm-<id>" routed through
 # meta — an ad hoc pane label with no recorded task. Mirrors the tmux adapter's
 # `list-windows | grep` fallback: find a live pane whose title matches <name>
-# and return "<session>:<pane-id>". Best-effort; needs jq.
+# and return "<session>:<pane-id>". The pane id is RECONSTRUCTED as
+# "terminal_<id>"/"plugin_<id>" (the same form new-pane returns and every other
+# function here stores/matches), not the raw numeric `id`, so the resolved
+# target is usable by the rest of the adapter. Best-effort; needs jq.
 fm_backend_zellij_resolve_bare_selector() {  # <name>
   local name=$1 ses id
   ses=$(fm_backend_zellij_current_session)
   id=$(fm_zellij_action list-panes --json 2>/dev/null \
-       | jq -r --arg t "$name" 'first(..|objects|select(.title? == $t)|.id) // empty' 2>/dev/null)
+       | jq -r --arg t "$name" \
+           'first(..|objects|select(.title? == $t)|((if .is_plugin then "plugin_" else "terminal_" end)+(.id|tostring))) // empty' 2>/dev/null)
   if [ -z "$id" ]; then
     echo "error: no zellij pane titled $name" >&2
     return 1
@@ -126,23 +130,23 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
 }
 
 # fm_backend_zellij_container_ensure: ensure a usable zellij session and print
-# its name. When firstmate runs inside zellij (the normal case), reuse that
-# session. Otherwise require an existing detached "firstmate" session — zellij,
-# unlike tmux, cannot spin up a headless detached session without a controlling
-# terminal, so this refuses with actionable guidance instead of silently
-# producing a broken target (docs/zellij-backend.md "Headless sessions"). Runs
-# the version/jq preflight first.
+# its name. Succeeds ONLY when firstmate runs inside zellij ($ZELLIJ and
+# $ZELLIJ_SESSION_NAME set); it reuses that session. A bare `zellij action`
+# (fm_zellij_action) targets the CURRENT session and cannot reach a merely
+# detached session, so an existing detached "firstmate" session is NOT usable —
+# reporting success for one would make the very next new-pane fail with no
+# session context. zellij, unlike tmux, also cannot spin up a headless detached
+# session without a controlling terminal, so this refuses with actionable
+# guidance instead of silently producing a broken target
+# (docs/zellij-backend.md "Headless sessions"). Runs the version/jq preflight
+# first.
 fm_backend_zellij_container_ensure() {
   fm_backend_zellij_preflight || return 1
   if [ -n "${ZELLIJ:-}" ] && [ -n "${ZELLIJ_SESSION_NAME:-}" ]; then
     printf '%s' "$ZELLIJ_SESSION_NAME"
     return 0
   fi
-  if zellij list-sessions -sn 2>/dev/null | grep -qx firstmate; then
-    printf 'firstmate'
-    return 0
-  fi
-  echo "error: the zellij backend needs firstmate to run inside a zellij session, or an existing detached 'firstmate' session. Start one with: zellij -s firstmate  (zellij cannot create a headless session without a terminal)" >&2
+  echo "error: the zellij backend needs firstmate to run inside a zellij session. Start one with: zellij -s firstmate  (a bare 'zellij action' only reaches the current session, so a detached session cannot be driven, and zellij cannot create a headless session without a terminal)" >&2
   return 1
 }
 

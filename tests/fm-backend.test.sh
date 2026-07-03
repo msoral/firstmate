@@ -269,10 +269,39 @@ SH
   # meta; only a NON fm-* bare name falls through to the live-window search).
   assert_contains "$out" "no metadata for fm-adhoc" "an fm-* selector must always require meta, not silently fall back to a live search"
 
-  out=$(PATH="$fakebin:$PATH" fm_backend_resolve_selector 'adhoc' "$state")
+  # The bare-name fallback now resolves via the ACTIVE backend; with the tmux
+  # backend selected it stays byte-identical to the old hardcoded tmux path.
+  out=$(FM_BACKEND=tmux PATH="$fakebin:$PATH" fm_backend_resolve_selector 'adhoc' "$state")
   [ "$out" = "firstmate:adhoc" ] || fail "an ad hoc bare name should resolve via the tmux live-window fallback, got '$out'"
 
-  pass "fm_backend_resolve_selector: session:window literal, fm-<id> via meta (always, even when the meta is missing), ad hoc bare name via tmux list-windows"
+  pass "fm_backend_resolve_selector: session:window literal, fm-<id> via meta (always, even when the meta is missing), ad hoc bare name via the active backend's live inventory (tmux)"
+}
+
+# The bare-name fallback must resolve via the ACTIVE backend, not a hardcoded
+# tmux: on a zellij box (the default) with no tmux installed it must reach the
+# zellij pane inventory instead of dying with "tmux: command not found".
+test_resolve_selector_bare_zellij_active() {
+  command -v jq >/dev/null 2>&1 || { pass "fm_backend_resolve_selector: bare zellij fallback (skipped, jq missing)"; return; }
+  local state=$TMP_ROOT/resolve-zellij-state fakebin out
+  mkdir -p "$state"
+  fakebin="$TMP_ROOT/resolve-zellij-fakebin"; mkdir -p "$fakebin"
+  # A zellij stub that lists one pane titled "adhoc" and NO tmux on PATH.
+  cat > "$fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = action ] && [ "${2:-}" = list-panes ]; then
+  printf '%s' '[{"id":4,"is_plugin":false,"title":"adhoc","pane_cwd":"/x"}]'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/zellij"
+  # PATH deliberately excludes tmux; only the fakebin + jq's dir are reachable.
+  local jqdir; jqdir=$(dirname "$(command -v jq)")
+  out=$(FM_BACKEND=zellij ZELLIJ=1 ZELLIJ_SESSION_NAME=firstmate \
+        PATH="$fakebin:$jqdir" fm_backend_resolve_selector 'adhoc' "$state" 2>&1) \
+    || fail "bare name on a zellij box should resolve via the zellij pane list, got: $out"
+  [ "$out" = "firstmate:terminal_4" ] \
+    || fail "bare name should resolve to <session>:<pane-id> via zellij, got: $out"
+  pass "fm_backend_resolve_selector: bare name resolves via the active zellij backend (no tmux needed)"
 }
 
 test_backend_of_selector_matches_explicit_target_meta() {
@@ -674,6 +703,7 @@ test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
+test_resolve_selector_bare_zellij_active
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new

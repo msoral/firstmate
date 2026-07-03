@@ -211,13 +211,14 @@ fm_backend_source() {  # <name>
 #                      against a live backend inventory (matches today's
 #                      behavior: tmux window names can be trusted from meta
 #                      without a live re-check).
-#   anything else      an ad hoc bare window name with no meta, resolved by
-#                      searching the legacy tmux live inventory. This remains
-#                      the compatibility fallback; herdr tasks should be
-#                      targeted by fm-<id> metadata or an explicit recorded
-#                      target.
+#   anything else      an ad hoc bare window/pane name with no meta, resolved by
+#                      searching the ACTIVE backend's live inventory (tmux window
+#                      list, zellij pane list). This remains the compatibility
+#                      fallback; herdr tasks should be targeted by fm-<id>
+#                      metadata or an explicit recorded target, and its bare
+#                      arm stays on the legacy tmux inventory.
 fm_backend_resolve_selector() {  # <raw-target> <state-dir>
-  local raw=$1 state=$2 meta window
+  local raw=$1 state=$2 meta window backend
   case "$raw" in
     *:*)
       printf '%s' "$raw"
@@ -235,8 +236,17 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
       return 0
       ;;
     *)
-      fm_backend_source tmux || return 1
-      fm_backend_tmux_resolve_bare_selector "$raw"
+      backend=$(fm_backend_name)
+      case "$backend" in
+        zellij)
+          fm_backend_source zellij || return 1
+          fm_backend_zellij_resolve_bare_selector "$raw"
+          ;;
+        *)
+          fm_backend_source tmux || return 1
+          fm_backend_tmux_resolve_bare_selector "$raw"
+          ;;
+      esac
       ;;
   esac
 }

@@ -225,14 +225,18 @@ test_container_ensure_inside_session() {
   pass "fm_backend_zellij_container_ensure: reuses \$ZELLIJ_SESSION_NAME when inside zellij"
 }
 
-test_container_ensure_existing_firstmate() {
+test_container_ensure_detached_firstmate_errors() {
   setup_case existing
+  # A merely-detached 'firstmate' session is NOT usable: a bare `zellij action`
+  # only reaches the CURRENT session, so container_ensure must refuse (not print
+  # 'firstmate') when firstmate is not running inside zellij, even if such a
+  # session exists.
   export FM_FAKE_ZELLIJ_SESSIONS=$'firstmate\nother\n'
   local out
-  out=$(unset ZELLIJ ZELLIJ_SESSION_NAME; fm_backend_zellij_container_ensure) \
-    || fail "container_ensure should accept an existing detached 'firstmate' session"
-  [ "$out" = firstmate ] || fail "container_ensure should print 'firstmate', got: $out"
-  pass "fm_backend_zellij_container_ensure: uses an existing detached firstmate session"
+  out=$(unset ZELLIJ ZELLIJ_SESSION_NAME; fm_backend_zellij_container_ensure 2>&1) \
+    && fail "container_ensure should refuse a merely-detached firstmate session"
+  assert_contains "$out" "zellij -s firstmate" "container_ensure should print actionable start guidance"
+  pass "fm_backend_zellij_container_ensure: refuses a detached firstmate session (bare action can't reach it)"
 }
 
 test_container_ensure_no_session_errors() {
@@ -240,9 +244,9 @@ test_container_ensure_no_session_errors() {
   export FM_FAKE_ZELLIJ_SESSIONS=$'other\n'
   local out
   out=$(unset ZELLIJ ZELLIJ_SESSION_NAME; fm_backend_zellij_container_ensure 2>&1) \
-    && fail "container_ensure should refuse when not inside zellij and no firstmate session exists"
+    && fail "container_ensure should refuse when not inside zellij"
   assert_contains "$out" "zellij -s firstmate" "container_ensure should print actionable start guidance"
-  pass "fm_backend_zellij_container_ensure: refuses with guidance when no usable session"
+  pass "fm_backend_zellij_container_ensure: refuses with guidance when not inside zellij"
 }
 
 # --- composer detection (fm-zellij-lib) --------------------------------------
@@ -274,6 +278,35 @@ test_composer_bordered_empty() {
   [ "$(fm_zellij_composer_state 'firstmate:terminal_1')" = empty ] \
     || fail "a bordered-but-empty composer should read empty"
   pass "fm_zellij_composer_state: bordered-empty composer -> empty"
+}
+
+test_composer_bottom_border_empty() {
+  setup_case comp-bottom-border
+  # A composer bottom border rendered BELOW the bare prompt must not read as
+  # pending: scanning up past the border reaches the bare prompt -> empty.
+  composer_dump $'> \n╰────────╯\n'
+  [ "$(fm_zellij_composer_state 'firstmate:terminal_1')" = empty ] \
+    || fail "a bottom border below a bare prompt should read empty"
+  pass "fm_zellij_composer_state: bottom border below bare prompt -> empty"
+}
+
+test_composer_idle_hint_empty() {
+  setup_case comp-hint
+  # An idle keyboard-shortcut hint rendered below the input row must be skipped,
+  # so the bare prompt above it decides the verdict -> empty.
+  composer_dump $'> \n? for shortcuts\n'
+  [ "$(fm_zellij_composer_state 'firstmate:terminal_1')" = empty ] \
+    || fail "an idle hint line below a bare prompt should read empty"
+  pass "fm_zellij_composer_state: idle hint line below bare prompt -> empty"
+}
+
+test_composer_pending_above_hint() {
+  setup_case comp-pending-hint
+  # A hint line below REAL typed input must not hide the pending text above it.
+  composer_dump $'> half-typed command\n? for shortcuts\n'
+  [ "$(fm_zellij_composer_state 'firstmate:terminal_1')" = pending ] \
+    || fail "real text above an idle hint line should still read pending"
+  pass "fm_zellij_composer_state: real text above an idle hint -> pending"
 }
 
 test_composer_busy_footer_empty() {
@@ -344,11 +377,14 @@ test_current_path_plugin_id_collision
 test_create_task
 test_create_task_refuses_duplicate
 test_container_ensure_inside_session
-test_container_ensure_existing_firstmate
+test_container_ensure_detached_firstmate_errors
 test_container_ensure_no_session_errors
 test_composer_empty_bare
 test_composer_pending_text
 test_composer_bordered_empty
+test_composer_bottom_border_empty
+test_composer_idle_hint_empty
+test_composer_pending_above_hint
 test_composer_busy_footer_empty
 test_composer_dim_ghost_empty
 test_composer_unknown_on_dump_failure

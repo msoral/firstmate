@@ -80,8 +80,8 @@ Then just talk:
 > alright merge it
 ```
 
-With the default zellij backend, run it inside zellij for the best experience: launching your harness from inside zellij puts every crewmate pane in your own session, where you can watch the crew work in real time or type into any pane to intervene.
-Outside zellij, default-backend crewmates land in a detached `firstmate` session you can attach to.
+With the default zellij backend, run it inside zellij: launching your harness from inside zellij puts every crewmate pane in your own session, where you can watch the crew work in real time or type into any pane to intervene.
+The zellij backend drives panes in the session it is running inside, so it needs firstmate to be inside a zellij session (`zellij -s firstmate`); outside one it refuses with that guidance rather than spawning into an unreachable session.
 When firstmate is running natively inside herdr and no backend override is set, it auto-detects herdr, prints an opt-out notice, and spawns into the experimental herdr backend.
 With experimental herdr, attach to the selected `HERDR_SESSION` and switch between firstmate-home workspaces.
 The primary home uses `firstmate`; each secondmate home uses `2ndmate-<secondmate-id>`, with that home's task tabs inside its own space.

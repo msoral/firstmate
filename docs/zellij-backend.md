@@ -69,7 +69,7 @@ colon. A zellij task additionally records `zellij_session=` and
 | current path               | `action list-panes --json` -> pane `pane_cwd`             |
 | target exists              | `action list-panes --json` -> pane present                |
 | kill task                  | `action close-pane -p <pane>`                             |
-| container ensure           | reuse `$ZELLIJ_SESSION_NAME`, else an existing `firstmate` session |
+| container ensure           | reuse `$ZELLIJ_SESSION_NAME` (must run inside zellij) |
 
 ### Verified CLI facts
 
@@ -101,27 +101,34 @@ The one place the zellij adapter deliberately differs from tmux. tmux reads the
 exact cursor row (`display-message '#{cursor_y}'` + a single-row styled
 `capture-pane -e`) to tell an empty composer from a human mid-typing and to
 strip dim ghost/placeholder text. zellij's CLI has **no cursor-row query**, so
-`fm-zellij-lib.sh` dumps the styled viewport (`dump-screen -a`) and classifies
-the **last non-blank line** as the composer proxy. For every verified harness
-the bottom-most rendered line is the composer input row (or, mid-turn, the busy
-footer that classification already treats as empty). The dim-ghost stripping
+`fm-zellij-lib.sh` dumps the styled viewport (`dump-screen -a`) and scans the
+**last few non-blank lines from the bottom up** for the composer input row. A
+harness may render a composer bottom border (`╰────╯`), a keyboard-shortcut hint
+(`? for shortcuts`), or a submit hint (`↵ to send`) *below* the input row, so
+the scan **skips** pure border/whitespace lines (stripping both vertical and
+horizontal box-drawing glyphs) and idle hint/footer lines (overridable via
+`FM_ZELLIJ_HINT_RE`), and lets the first genuine line decide the verdict. A busy
+footer still reads as empty (an agent mid-turn). The dim-ghost stripping
 (`fm_zellij_strip_ghost`) and the empty/pending/unknown verdicts are otherwise
 byte-for-byte the same as `fm-tmux-lib.sh`, so both backends behave identically
 to callers. `list-panes` does expose `cursor_coordinates_in_pane`, so a
-future refinement could read the exact cursor row; the last-line heuristic is
+future refinement could read the exact cursor row; the bottom-window heuristic is
 what `tests/fm-backend-zellij-smoke.test.sh` keeps honest.
 
 ## Headless sessions: zellij needs a terminal
 
 Unlike tmux (`new-session -d` starts a detached server session headlessly),
 zellij sessions are bound to a client terminal and cannot be created without
-one. So `fm_backend_zellij_container_ensure`:
+one. The adapter also drives panes with a bare `zellij action` (no `--session`
+flag), which only reaches the session the caller is *inside*, so a merely
+detached session cannot be driven at all. So `fm_backend_zellij_container_ensure`:
 
 1. reuses the current session (`$ZELLIJ_SESSION_NAME`) when firstmate runs
    inside zellij — the normal case, since zellij is the default a captain runs
    firstmate in; else
-2. reuses an existing detached `firstmate` session if one is present; else
-3. refuses with actionable guidance (`zellij -s firstmate`).
+2. refuses with actionable guidance (`zellij -s firstmate`), because a detached
+   session (even one named `firstmate`) is not reachable by a bare `zellij
+   action` and zellij cannot create a headless session without a terminal.
 
 The test suite gives zellij a pty via python3 to exercise the real binary;
 `tests/fm-backend-zellij-smoke.test.sh` skips unless zellij >= 0.44.0, jq, and
