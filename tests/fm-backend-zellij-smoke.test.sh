@@ -114,6 +114,30 @@ printf '%s' "$CAP" | grep -q ZELLIJ_SMOKE_MARKER_OK \
   || fail "capture should show the echoed marker; got:"$'\n'"$CAP"
 pass "send_text_line + capture: text is delivered and captured"
 
+# composer_state: the styled `dump-screen -a` read against the real binary. An
+# idle shell prompt has no pending input, so it must read a real verdict (not
+# 'unknown'); 'empty' is the expected idle classification.
+STATE=$(fm_zellij_composer_state "$TARGET")
+case "$STATE" in
+  unknown) fail "composer_state should read a real verdict on an idle prompt, got 'unknown'" ;;
+  empty)   pass "composer_state: styled dump-screen -a read classifies an idle prompt as empty" ;;
+  *)       pass "composer_state: styled dump-screen -a read gave a real verdict ('$STATE')" ;;
+esac
+
+# current_path follows a live cd (mirrors fm-spawn's worktree-detection poll,
+# which waits for pane_cwd to CHANGE to the worktree — a static launch cwd would
+# hang every spawn). cd into /tmp and assert current_path tracks it.
+TMP_P=$(cd /tmp && pwd -P)
+fm_backend_zellij_send_text_line "$TARGET" 'cd /tmp'
+NEWCWD=
+for _ in $(seq 1 10); do
+  sleep 0.5
+  NEWCWD=$(fm_backend_zellij_current_path "$TARGET")
+  [ "$NEWCWD" = "$TMP_P" ] && break
+done
+[ "$NEWCWD" = "$TMP_P" ] || fail "current_path should follow the cd to '$TMP_P', got '$NEWCWD'"
+pass "current_path: tracks the live cwd after a cd, not just the initial one"
+
 # kill: the pane is gone afterward.
 fm_backend_zellij_kill "$TARGET"
 sleep 1

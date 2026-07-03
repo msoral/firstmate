@@ -113,8 +113,8 @@ test_capture() {
   local out
   out=$(fm_backend_zellij_capture 'firstmate:terminal_2' 2)
   [ "$out" = $'line3\nline4' ] || fail "capture should return the last N lines, got: $out"
-  log_has $'dump-screen\x1f-p\x1fterminal_2' || fail "capture should dump-screen -p terminal_2"
-  pass "fm_backend_zellij_capture: dump-screen -p <pane>, tail N lines"
+  log_has $'dump-screen\x1f-f\x1f-p\x1fterminal_2' || fail "capture should dump-screen -f -p terminal_2"
+  pass "fm_backend_zellij_capture: dump-screen -f -p <pane>, tail N lines"
 }
 
 # --- key translation ---------------------------------------------------------

@@ -62,7 +62,7 @@ colon. A zellij task additionally records `zellij_session=` and
 | firstmate primitive        | zellij command                                            |
 | -------------------------- | --------------------------------------------------------- |
 | create task pane           | `action new-pane --name fm-<id> --cwd <proj>` -> `terminal_<n>` |
-| bounded capture            | `action dump-screen -p <pane>` (tail N lines)             |
+| bounded capture            | `action dump-screen -f -p <pane>` (tail N lines; `-f` gives scrollback parity with tmux) |
 | styled capture (composer)  | `action dump-screen -a -p <pane>`                         |
 | send named key             | `action send-keys -p <pane> <key>` (Enter / Esc / Ctrl c) |
 | send literal text          | `action write-chars -p <pane> -- <text>`                  |

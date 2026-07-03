@@ -98,12 +98,13 @@ fm_backend_zellij_current_session() {
 }
 
 # fm_backend_zellij_capture: bounded plain-text pane capture. Dumps the pane's
-# viewport (no styling) and returns its last <lines> lines — the zellij analogue
-# of tmux's `capture-pane -p -S -"$N"`.
+# viewport plus scrollback (`-f`/--full, no styling) and returns its last <lines>
+# lines — the zellij analogue of tmux's `capture-pane -p -S -"$N"`, which also
+# reaches back into scrolled-off history when N exceeds the visible viewport.
 fm_backend_zellij_capture() {  # <target> <lines>
   local pane
   pane=$(fm_zellij_pane_of_target "$1")
-  fm_zellij_action dump-screen -p "$pane" 2>/dev/null | tail -n "$2"
+  fm_zellij_action dump-screen -f -p "$pane" 2>/dev/null | tail -n "$2"
 }
 
 # fm_backend_zellij_send_key: one named key, translated from firstmate's tmux
