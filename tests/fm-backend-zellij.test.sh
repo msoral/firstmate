@@ -311,6 +311,26 @@ test_composer_pending_above_hint() {
   pass "fm_zellij_composer_state: real text above an idle hint -> pending"
 }
 
+test_composer_typed_shortcuts_word_pending() {
+  setup_case comp-typed-shortcuts
+  # Genuine typed input that merely CONTAINS the word "shortcuts" must not be
+  # swallowed as an idle hint: only "? for shortcuts" or a submit glyph is a hint.
+  composer_dump $'> add keyboard shortcuts to settings\n'
+  [ "$(fm_zellij_composer_state 'firstmate:terminal_1')" = pending ] \
+    || fail "typed text containing 'shortcuts' should read pending, not empty"
+  pass "fm_zellij_composer_state: typed 'shortcuts' text -> pending"
+}
+
+test_composer_typed_to_send_word_pending() {
+  setup_case comp-typed-to-send
+  # Genuine typed input that merely CONTAINS "to send" must not be swallowed as a
+  # submit hint: only the ↵/⏎ glyph marks a submit hint.
+  composer_dump $'> draft the note to send tomorrow\n'
+  [ "$(fm_zellij_composer_state 'firstmate:terminal_1')" = pending ] \
+    || fail "typed text containing 'to send' should read pending, not empty"
+  pass "fm_zellij_composer_state: typed 'to send' text -> pending"
+}
+
 test_composer_busy_footer_empty() {
   setup_case comp-busy
   composer_dump $'working on it\nesc to interrupt\n'
@@ -387,6 +407,8 @@ test_composer_bordered_empty
 test_composer_bottom_border_empty
 test_composer_idle_hint_empty
 test_composer_pending_above_hint
+test_composer_typed_shortcuts_word_pending
+test_composer_typed_to_send_word_pending
 test_composer_busy_footer_empty
 test_composer_dim_ghost_empty
 test_composer_unknown_on_dump_failure

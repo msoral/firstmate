@@ -122,10 +122,13 @@ fm_zellij_strip_ghost() {
 # Idle hint/footer lines a harness may render BELOW the input row (or inside the
 # composer box) while idle: keyboard-shortcut hints and submit hints. These are
 # NOT pending input, so composer classification skips them and keeps scanning up
-# for the real input row. Override per-harness with FM_ZELLIJ_HINT_RE. Kept
-# footer-shaped (submit glyphs ↵/⏎, "shortcuts", "to send") rather than matching
-# a bare word like "send" so genuinely typed text is never swallowed as a hint.
-FM_ZELLIJ_HINT_RE_DEFAULT='\? *for *shortcuts|shortcuts|↵|⏎|to send'
+# for the real input row. Override per-harness with FM_ZELLIJ_HINT_RE. A hint
+# line is identified only by a UI submit glyph (↵/⏎, which a human never types)
+# or the specific "? for shortcuts" phrase, never by containing a common word
+# like "shortcuts" or "send" — so genuinely typed input such as "add keyboard
+# shortcuts to settings" or "draft the note to send tomorrow" is never swallowed
+# as a hint and misclassified as an empty composer.
+FM_ZELLIJ_HINT_RE_DEFAULT='\? +for +shortcuts|[↵⏎]'
 
 # fm_zellij_composer_lines: the last few (<=5) non-blank lines of the pane's
 # styled viewport, oldest-first, with dim ghost text removed and escapes
