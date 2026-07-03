@@ -92,24 +92,24 @@ test_backend_name_precedence() {
   dir="$TMP_ROOT/name-precedence"; cfg="$dir/config"
   mkdir -p "$cfg"
 
-  # TMUX/HERDR_ENV explicitly unset in a subshell so this stays deterministic
-  # regardless of the runtime this test suite itself happens to execute inside
-  # (e.g. a real tmux pane, which is the normal case for a captain's session).
-  # fm_backend_name reads FM_BACKEND_CONFIG_DIR (bound once, at fm-backend.sh
-  # source time, from FM_CONFIG_OVERRIDE); a later FM_CONFIG_OVERRIDE=... prefix
-  # on the function call itself does not re-bind it, so these calls set
-  # FM_BACKEND_CONFIG_DIR directly.
-  [ "$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
-    || fail "fm_backend_name should default to tmux with no env/config/detection markers"
+  # TMUX/ZELLIJ/HERDR_ENV explicitly unset in a subshell so this stays
+  # deterministic regardless of the runtime this test suite itself happens to
+  # execute inside (a real tmux or zellij pane, the normal case for a captain's
+  # session). fm_backend_name reads FM_BACKEND_CONFIG_DIR (bound once, at
+  # fm-backend.sh source time, from FM_CONFIG_OVERRIDE); a later
+  # FM_CONFIG_OVERRIDE=... prefix on the function call itself does not re-bind
+  # it, so these calls set FM_BACKEND_CONFIG_DIR directly.
+  [ "$(unset TMUX ZELLIJ HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = zellij ] \
+    || fail "fm_backend_name should default to zellij with no env/config/detection markers"
 
   printf 'tmux\n' > "$cfg/backend"
-  [ "$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX ZELLIJ HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "fm_backend_name should read config/backend"
 
-  [ "$(unset TMUX HERDR_ENV; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
+  [ "$(unset TMUX ZELLIJ HERDR_ENV; FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)" = tmux ] \
     || fail "FM_BACKEND env should win over config/backend"
 
-  pass "fm_backend_name: FM_BACKEND env > config/backend > default tmux"
+  pass "fm_backend_name: FM_BACKEND env > config/backend > default zellij"
 }
 
 # fm_backend_detect: environment-marker runtime auto-detection (mirrors
@@ -119,25 +119,39 @@ test_backend_name_precedence() {
 test_backend_detect_precedence() {
   local out
 
-  if out=$(unset TMUX HERDR_ENV; fm_backend_detect); then
+  if out=$(unset TMUX ZELLIJ HERDR_ENV; fm_backend_detect); then
     fail "fm_backend_detect should return 1 (undetected) with no markers set, got '$out'"
   fi
 
-  out=$(unset TMUX; HERDR_ENV=1 fm_backend_detect) \
+  out=$(unset TMUX ZELLIJ; HERDR_ENV=1 fm_backend_detect) \
     || fail "fm_backend_detect should succeed when HERDR_ENV=1"
   [ "$out" = herdr ] || fail "fm_backend_detect should report herdr for HERDR_ENV=1 alone, got '$out'"
 
-  out=$(unset HERDR_ENV; TMUX='fake,1,0' fm_backend_detect) \
+  out=$(unset ZELLIJ HERDR_ENV; TMUX='fake,1,0' fm_backend_detect) \
     || fail "fm_backend_detect should succeed when \$TMUX is set"
   [ "$out" = tmux ] || fail "fm_backend_detect should report tmux for \$TMUX alone, got '$out'"
 
-  # Nesting: tmux started inside a herdr pane carries BOTH markers. Innermost
-  # (tmux) must win, since that is the surface firstmate is actually running on.
+  out=$(unset TMUX HERDR_ENV; ZELLIJ=0 fm_backend_detect) \
+    || fail "fm_backend_detect should succeed when \$ZELLIJ is set"
+  [ "$out" = zellij ] || fail "fm_backend_detect should report zellij for \$ZELLIJ alone, got '$out'"
+
+  # Nesting: a tmux started inside a zellij or herdr pane carries BOTH markers.
+  # Innermost (tmux) must win, since that is the surface firstmate is actually
+  # running on.
   out=$(TMUX='fake,1,0' HERDR_ENV=1 fm_backend_detect) \
     || fail "fm_backend_detect should succeed with both markers present"
   [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over herdr), got '$out'"
 
-  pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, \$TMUX -> tmux, both (tmux nested in herdr) -> tmux wins"
+  out=$(unset HERDR_ENV; TMUX='fake,1,0' ZELLIJ=0 fm_backend_detect) \
+    || fail "fm_backend_detect should succeed with tmux+zellij markers present"
+  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over zellij), got '$out'"
+
+  # zellij started inside herdr (or vice versa): zellij is checked before herdr.
+  out=$(unset TMUX; ZELLIJ=0 HERDR_ENV=1 fm_backend_detect) \
+    || fail "fm_backend_detect should succeed with zellij+herdr markers present"
+  [ "$out" = zellij ] || fail "fm_backend_detect should prefer zellij over herdr, got '$out'"
+
+  pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, \$ZELLIJ -> zellij, \$TMUX -> tmux, tmux wins when nested"
 }
 
 # fm_backend_name's auto-detect step: fires only when FM_BACKEND/config/backend
@@ -151,12 +165,12 @@ test_backend_name_autodetect_notice() {
   errfile="$dir/err.txt"
 
   : > "$errfile"
-  out=$(unset TMUX HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = tmux ] || fail "fm_backend_name should default to tmux with no detection markers, got '$out'"
+  out=$(unset TMUX ZELLIJ HERDR_ENV; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = zellij ] || fail "fm_backend_name should default to zellij with no detection markers, got '$out'"
   [ -s "$errfile" ] && fail "fm_backend_name must stay silent with no detection markers"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
-  out=$(unset TMUX; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset TMUX ZELLIJ; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = herdr ] || fail "fm_backend_name should auto-detect herdr from HERDR_ENV=1, got '$out'"
   assert_contains "$(cat "$errfile")" "EXPERIMENTAL herdr backend" \
     "fm_backend_name did not print a loud notice when auto-detecting herdr"
@@ -164,9 +178,14 @@ test_backend_name_autodetect_notice() {
     "fm_backend_name's auto-detect notice did not name the opt-out"
 
   : > "$errfile"
-  out=$(unset HERDR_ENV; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  out=$(unset HERDR_ENV ZELLIJ; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = tmux ] || fail "fm_backend_name should auto-detect tmux from \$TMUX, got '$out'"
-  [ -s "$errfile" ] && fail "auto-detecting tmux must stay silent (today's unchanged default-path behavior)"$'\n'"$(cat "$errfile")"
+  [ -s "$errfile" ] && fail "auto-detecting tmux must stay silent (a non-experimental backend)"$'\n'"$(cat "$errfile")"
+
+  : > "$errfile"
+  out=$(unset HERDR_ENV TMUX; ZELLIJ=0 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = zellij ] || fail "fm_backend_name should auto-detect zellij from \$ZELLIJ, got '$out'"
+  [ -s "$errfile" ] && fail "auto-detecting zellij must stay silent (the non-experimental reference backend)"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
   out=$(TMUX='fake,1,0' HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
@@ -200,10 +219,12 @@ test_backend_name_explicit_beats_detection() {
 
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
+  fm_backend_validate zellij 2>/dev/null || fail "fm_backend_validate should accept zellij"
+  fm_backend_validate herdr 2>/dev/null || fail "fm_backend_validate should accept herdr"
   local out
-  out=$(fm_backend_validate zellij 2>&1) && fail "fm_backend_validate should refuse zellij (P1 has no such adapter)"
-  assert_contains "$out" "unknown backend 'zellij'" "fm_backend_validate did not name the rejected backend"
-  pass "fm_backend_validate: tmux accepted, an unimplemented backend refused loudly"
+  out=$(fm_backend_validate wezterm 2>&1) && fail "fm_backend_validate should refuse wezterm (no such adapter)"
+  assert_contains "$out" "unknown backend 'wezterm'" "fm_backend_validate did not name the rejected backend"
+  pass "fm_backend_validate: known backends accepted, an unimplemented backend refused loudly"
 }
 
 test_meta_get_and_backend_of_meta() {
@@ -551,11 +572,11 @@ test_spawn_refuses_unknown_backend_flag() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --backend zellij 2>&1)
+    "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --backend wezterm 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn --backend zellij should refuse (P1 is tmux-only)"
-  assert_contains "$out" "unknown backend 'zellij'" "fm-spawn did not name the rejected backend"
-  pass "fm-spawn.sh --backend zellij is refused loudly (tmux-only in P1)"
+  [ "$status" -ne 0 ] || fail "fm-spawn --backend wezterm should refuse (no such adapter)"
+  assert_contains "$out" "unknown backend 'wezterm'" "fm-spawn did not name the rejected backend"
+  pass "fm-spawn.sh --backend wezterm is refused loudly (unimplemented backend)"
 }
 
 test_spawn_refuses_unknown_fm_backend_env() {

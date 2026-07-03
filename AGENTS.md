@@ -77,7 +77,7 @@ config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "de
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force hand-editing; inherited by secondmate homes (section 10)
-config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend, herdr is a second, experimental backend (docs/herdr-backend.md); not inherited into secondmate homes
+config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then zellij; zellij is the default reference backend (docs/zellij-backend.md, needs zellij >= 0.44.0 + jq), tmux is still fully selectable, herdr is the experimental backend (docs/herdr-backend.md); not inherited into secondmate homes
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -92,7 +92,7 @@ state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.turn-ended    touched by turn-end hooks
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
-  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a task on a non-default runtime backend also records backend= (absent means tmux, the verified reference backend; herdr is a second, experimental backend recording herdr_session=, herdr_workspace_id=, herdr_tab_id=, herdr_pane_id= too - docs/herdr-backend.md; bin/fm-backend.sh, section 8) (fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
+  <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a task on a non-tmux runtime backend also records backend= (absent still means tmux, for legacy compatibility; the default zellij backend records backend=zellij plus zellij_session=/zellij_pane_id= - docs/zellij-backend.md; the experimental herdr backend records herdr_session=, herdr_workspace_id=, herdr_tab_id=, herdr_pane_id= too - docs/herdr-backend.md; bin/fm-backend.sh, section 8) (fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request= and x_request_ts= for an X-mention-originated task, section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
@@ -109,6 +109,7 @@ state/               volatile runtime signals; gitignored
 ```
 
 Task ids are short kebab slugs with a random suffix, e.g. `fix-login-k3`.
+For the zellij backend (the default), each task is a single pane labeled `fm-<id>`, and the recorded `window=` target is `<zellij-session>:<pane-id>` (e.g. `firstmate:terminal_5`).
 For the tmux backend, the task window is always named `fm-<id>`.
 For the herdr backend, the task tab is labeled `fm-<id>` and the recorded `window=` target is `<herdr-session>:<pane-id>`.
 For the herdr backend, task tabs live inside the current firstmate home's workspace: `firstmate` for the primary, `2ndmate-<secondmate-id>` for a secondmate home.
@@ -308,7 +309,7 @@ Reconcile reality with your records before doing anything else, working from the
    Treat those status tails as wake-event history; when you need a live current-state read for a recorded direct report, use `bin/fm-crew-state.sh <id>` instead of inferring from the last status line.
    If older wake-event history matters, read the individual full status log named in the digest instead of bulk-reading every status file.
 4. Use the `window=` values from the digest's `state/*.meta` entries as the live direct-report set, and read the digest's per-task `endpoint: alive|dead` line for each - that cheap check is already done; do not re-probe it yourself.
-   Do not sweep every `fm-*` tmux window or herdr tab across all sessions during recovery; another firstmate home's child endpoints may share that namespace and are not this home's orphans.
+   Do not sweep every `fm-*` zellij pane, tmux window, or herdr tab across all sessions during recovery; another firstmate home's child endpoints may share that namespace and are not this home's orphans.
 5. If the digest reports a recorded direct-report's endpoint as `dead` (or a meta has no `window=`), reconcile it through its meta as described below.
 6. For meta with no window, or an endpoint the digest reported dead, reconcile by kind.
    For ordinary crewmates, check `treehouse status` in that project, salvage or report.
@@ -323,7 +324,7 @@ Reconcile reality with your records before doing anything else, working from the
 10. Having already handled the drained wakes from the digest, follow the section 8 watcher checklist through the digest's own closing reminder; if the lock was refused or `state/.afk` exists, follow the digest's no-direct-arm guidance.
 
 A firstmate restart must be a non-event.
-All truth lives in each task's backend live-task inventory (tmux by hard default, or herdr when selected or auto-detected), state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
+All truth lives in each task's backend live-task inventory (zellij by default, or tmux/herdr when selected or auto-detected), state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, and treehouse; your conversation memory is a cache.
 
 ## 6. Project management
 
@@ -488,7 +489,8 @@ bin/fm-spawn.sh <id> projects/<repo> --harness codex   # explicit per-task harne
 bin/fm-spawn.sh <id> projects/<repo> codex       # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> grok        # per-task harness override
 bin/fm-spawn.sh <id> projects/<repo> --harness codex --model gpt-5.5 --effort high   # explicit profile axes
-bin/fm-spawn.sh <id> projects/<repo> --backend tmux   # explicit runtime backend; tmux is the verified reference backend
+bin/fm-spawn.sh <id> projects/<repo> --backend zellij  # explicit runtime backend; zellij is the default reference backend (docs/zellij-backend.md), version-gates at spawn
+bin/fm-spawn.sh <id> projects/<repo> --backend tmux   # tmux backend (still fully selectable)
 bin/fm-spawn.sh <id> projects/<repo> --backend herdr  # experimental herdr backend (docs/herdr-backend.md); version-gates at spawn
 bin/fm-spawn.sh <id> projects/<repo> --scout     # scout task; records kind=scout in meta
 bin/fm-spawn.sh <id> --secondmate                 # launch a registered persistent secondmate in its home
@@ -500,13 +502,13 @@ Dispatch several tasks in one call by passing `id=repo` pairs instead of a singl
 If one pair fails, the rest still run and the batch exits non-zero.
 When `config/crew-dispatch.json` exists, include a shared `--harness` for every crewmate or scout batch after consulting the dispatch rules.
 
-The script resolves the harness (`fm-harness.sh crew` for crewmate/scout tasks only when `config/crew-dispatch.json` is absent, `fm-harness.sh secondmate` for `kind=secondmate`; section 4), resolves the runtime backend (`--backend`, then `FM_BACKEND`, then `config/backend`, then runtime auto-detection - the runtime firstmate itself is executing inside, from `$TMUX`/`HERDR_ENV=1` markers, nesting resolved innermost-first - then `tmux`; an auto-detected herdr spawn prints a loud stderr notice, auto-detected tmux stays silent), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `model=`, `effort=`, `kind=`, `mode=`, and `yolo=` in the task's meta; only a non-default runtime backend is recorded as `backend=` because absent means tmux.
+The script resolves the harness (`fm-harness.sh crew` for crewmate/scout tasks only when `config/crew-dispatch.json` is absent, `fm-harness.sh secondmate` for `kind=secondmate`; section 4), resolves the runtime backend (`--backend`, then `FM_BACKEND`, then `config/backend`, then runtime auto-detection - the runtime firstmate itself is executing inside, from `$TMUX`/`$ZELLIJ`/`HERDR_ENV=1` markers, nesting resolved innermost-first - then the default `zellij`; an auto-detected herdr spawn prints a loud stderr notice, auto-detected zellij or tmux stays silent), owns the verified launch templates, resolves the project's delivery mode (`fm-project-mode.sh`) for ship/scout tasks, and records `harness=`, `model=`, `effort=`, `kind=`, `mode=`, and `yolo=` in the task's meta; a non-tmux runtime backend is recorded as `backend=` (a zellij task also records zellij_session=/zellij_pane_id=), and a tmux task omits backend= because absent means tmux.
 A non-flag third argument containing whitespace is treated as a raw launch command (only for verifying new adapters).
 When `config/crew-dispatch.json` exists, the script refuses crewmate or scout launches without an explicit harness because firstmate must have already resolved the profile choice at intake.
 When `--model` or `--effort` is omitted, the corresponding meta value is `default` and no launch flag is passed for that axis, except that a `kind=secondmate` spawn can fill the omitted axis from the optional tokens in `config/secondmate-harness`.
 For `kind=secondmate`, the same script launches in the registered or explicit firstmate home instead of running `treehouse get` for a project, records `home=` and `projects=`, and uses the charter brief as the launch prompt.
 
-For ship and scout tasks, the script creates the runtime endpoint (a tmux window by default, or a herdr tab/pane when `backend=herdr`), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
+For ship and scout tasks, the script creates the runtime endpoint (a zellij pane by default, a tmux window when `backend=tmux`, or a herdr tab/pane when `backend=herdr`), runs `treehouse get`, waits for the worktree subshell, asserts the resolved worktree is a genuine isolated worktree distinct from the primary checkout (aborting the spawn otherwise, to prevent the worktree tangle of section 8), installs the turn-end hook, records `state/<id>.meta`, and launches the agent with the brief.
 For grok, the turn-end hook is one firstmate-owned global hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, activated only when the worktree holds the per-task `.fm-grok-turnend` token pointer that matches `state/<id>.grok-turnend-token`; teardown removes the pointer and token.
 For `kind=secondmate`, the script creates the same kind of runtime endpoint but starts directly in the persistent home.
 With herdr, ordinary crewmate and scout spawns use the current `FM_HOME` workspace; a primary `--secondmate` spawn uses the secondmate target home's workspace, so secondmate-owned tabs do not mix into the primary `firstmate` space.
@@ -689,7 +691,7 @@ Heartbeats back off exponentially while they are the only wakes firing (600s dou
 Due per-task checks run before signal scanning so chatty crewmate status updates cannot starve slow polls like merge detection.
 
 Never rely on hooks or status files alone; when a heartbeat wake does reach you, the review of every window is mandatory and unconditional.
-Each task's backend live-task inventory is the ground truth (tmux when `backend=` is absent; a task's meta may record a different `backend=` - herdr is the one other implemented, experimental backend today, docs/herdr-backend.md).
+Each task's backend live-task inventory is the ground truth (zellij by default; absent `backend=` means tmux for legacy tasks; a task's meta records `backend=` for any non-tmux backend - zellij is the default reference backend, docs/zellij-backend.md, and herdr is the experimental one, docs/herdr-backend.md).
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.

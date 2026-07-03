@@ -40,7 +40,7 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 ## Features
 
 - **One liaison** - you talk only to the first mate; it dispatches, supervises, escalates only real decisions, and reports plain outcomes.
-- **A visible crew** - every crewmate works in its own tmux window or experimental herdr tab you can watch or type into; the first mate reconciles.
+- **A visible crew** - every crewmate works in its own zellij pane (or tmux window, or experimental herdr tab) you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver a change; scout tasks investigate, plan, reproduce, or audit and leave a report.
 - **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` autonomy flag.
@@ -48,13 +48,13 @@ This is.. a directory that turns any agent into your firstmate, and you the capt
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you.
 - **Optional X mode** - opt in with one local `.env` token so firstmate can answer your public `@myfirstmate` mentions, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post one public-safe completion follow-up without changing non-X behavior; dry-run preview records would-be replies and dismissals locally before go-live.
 - **Guarded by construction** - the first mate is read-only over your projects outside guarded clone refreshes, safe branch pruning, and approved `local-only` fast-forward merges; crewmates make every project change behind your merge approval.
-- **Restart-proof** - all state lives on disk and in the active session backend (tmux by hard default, herdr when selected or auto-detected); kill the session anytime and the next one reconciles and carries on.
+- **Restart-proof** - all state lives on disk and in the active session backend (zellij by default, tmux or herdr when selected or auto-detected); kill the session anytime and the next one reconciles and carries on.
 
 Full detail on every feature lives in [docs/architecture.md](docs/architecture.md).
 
 ## Quick Start
 
-**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and tmux for the reference session backend.
+**Requirements:** a verified agent harness (claude, codex, opencode, pi, or grok), git with GitHub auth, and zellij >=0.44.0 with `jq` for the reference session backend (tmux is an optional alternative backend).
 Experimental herdr spawns additionally require `herdr` and `jq`, checked at spawn time.
 The first mate detects and offers to install everything else.
 
@@ -80,8 +80,8 @@ Then just talk:
 > alright merge it
 ```
 
-With the default tmux backend, run it inside tmux for the best experience: launching your harness from inside tmux puts every crewmate window in your own session, where you can watch the crew work in real time or type into any window to intervene.
-Outside tmux, default-backend crewmates land in a detached `firstmate` session you can attach to.
+With the default zellij backend, run it inside zellij for the best experience: launching your harness from inside zellij puts every crewmate pane in your own session, where you can watch the crew work in real time or type into any pane to intervene.
+Outside zellij, default-backend crewmates land in a detached `firstmate` session you can attach to.
 When firstmate is running natively inside herdr and no backend override is set, it auto-detects herdr, prints an opt-out notice, and spawns into the experimental herdr backend.
 With experimental herdr, attach to the selected `HERDR_SESSION` and switch between firstmate-home workspaces.
 The primary home uses `firstmate`; each secondmate home uses `2ndmate-<secondmate-id>`, with that home's task tabs inside its own space.
@@ -100,7 +100,7 @@ The primary home uses `firstmate`; each secondmate home uses `2ndmate-<secondmat
     │ backend sends / status files │
     ▼              ▼               ▼
  ┌────────┐   ┌────────┐      ┌────────┐
- │fm-task1│   │fm-task2│  ... │fm-taskN│   tmux windows or herdr tabs you can watch
+ │fm-task1│   │fm-task2│  ... │fm-taskN│   zellij panes, tmux windows, or herdr tabs you can watch
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
@@ -117,8 +117,8 @@ Persistent secondmate homes are linked firstmate worktrees; locked session start
 Crewmate dispatch can stay on a static `config/crew-harness` or use optional natural-language profiles in local `config/crew-dispatch.json` to choose a per-task harness, model, and effort.
 When that profile file exists, crewmate and scout spawns must pass the resolved harness explicitly so `config/crew-harness` is not used as an unnoticed bypass.
 Secondmate launch can use a separate local `config/secondmate-harness`, whose first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]` to durably pin that secondmate's launch profile.
-The runtime session-provider backend is selected from explicit `--backend`, `FM_BACKEND`, local `config/backend`, runtime auto-detection from `$TMUX` or `HERDR_ENV=1`, then the hard `tmux` default.
-`tmux` is the verified reference backend, and `herdr` is experimental.
+The runtime session-provider backend is selected from explicit `--backend`, `FM_BACKEND`, local `config/backend`, runtime auto-detection from `$TMUX`, `$ZELLIJ`, or `HERDR_ENV=1`, then the default `zellij`.
+`zellij` is the default reference backend, `tmux` is still fully selectable, and `herdr` is experimental.
 Secondmate homes inherit the primary's declared local config, including `config/crew-dispatch.json`, `config/crew-harness`, and `config/backlog-backend`, at launch, during the locked session-start bootstrap step, or during an explicit `bin/fm-config-push.sh` run, so their own crewmates, dispatch profiles, and backlog backend use the primary settings.
 When a routed request goes to a secondmate, firstmate marks it so the answer returns through status or a document pointer; direct typing into that secondmate window stays conversational.
 A presence-gated sub-supervisor (`/afk`) can self-handle routine events and batch only what matters while you step away.

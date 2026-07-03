@@ -14,10 +14,14 @@
 # data/fm-backend-design-d7/herdr-verification-p2.md for its empirical basis.
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
-# treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
-# `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# backend, currently experimental herdr, carries an explicit `backend=` line.
+# treats that as `tmux` (fm_backend_of_meta), so every task spawned before the
+# tmux->zellij migration keeps resolving to tmux with no forced rewrite. Any
+# task on a non-tmux backend carries an explicit `backend=` line: the now-default
+# `zellij` reference backend (docs/zellij-backend.md) and the experimental
+# `herdr` backend both record it. A new default spawn therefore writes
+# `backend=zellij` even though the ABSENT reader-default stays tmux - the two are
+# intentionally distinct so legacy metas and freshly spawned metas both resolve
+# correctly.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -41,7 +45,7 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # data/fm-backend-design-d7/herdr-addendum.md) - verified against the real
 # v0.7.1/protocol-14 binary (data/fm-backend-design-d7/herdr-verification-p2.md)
 # but newer than tmux's long-proven default path.
-FM_BACKEND_KNOWN="tmux herdr"
+FM_BACKEND_KNOWN="tmux herdr zellij"
 
 # fm_backend_is_known: 0 iff <name> has a verified adapter.
 fm_backend_is_known() {  # <name>
@@ -57,14 +61,19 @@ fm_backend_is_known() {  # <name>
 # env-marker detection layer for harnesses). Prints the detected backend name
 # and returns 0, or returns 1 when nothing is detected. Nesting resolves
 # INNERMOST-first: tmux sets $TMUX in every process running inside it, even a
-# tmux started inside a herdr pane, so $TMUX is checked first and wins over
-# HERDR_ENV=1 in that nested case. herdr injects HERDR_ENV=1 (plus
-# HERDR_SOCKET_PATH/HERDR_PANE_ID) into every process it manages a pane for;
-# HERDR_ENV=1 alone (no $TMUX) selects herdr. Both markers empirically verified
-# on the reference dev machine.
+# tmux started inside a zellij or herdr pane, so $TMUX is checked first and wins
+# in that nested case. zellij injects $ZELLIJ (plus $ZELLIJ_SESSION_NAME) into
+# every process in a session; $ZELLIJ with no $TMUX selects zellij (the reference
+# backend). herdr injects HERDR_ENV=1 (plus HERDR_SOCKET_PATH/HERDR_PANE_ID) into
+# every process it manages a pane for; HERDR_ENV=1 alone selects herdr. All
+# markers empirically verified on the reference dev machine.
 fm_backend_detect() {
   if [ -n "${TMUX:-}" ]; then
     printf 'tmux'
+    return 0
+  fi
+  if [ -n "${ZELLIJ:-}" ]; then
+    printf 'zellij'
     return 0
   fi
   if [ "${HERDR_ENV:-}" = "1" ]; then
@@ -77,13 +86,14 @@ fm_backend_detect() {
 # fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
 # explicit per-task override. Precedence: FM_BACKEND env, then config/backend
 # (a single word on its first non-empty line, mirroring config/crew-harness),
-# then runtime auto-detection (fm_backend_detect), then default tmux. A
-# per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
-# precedence over this resolution entirely; it is not read here. Auto-detect
-# fires only when nothing was explicitly configured, so an explicit setting
-# always wins. Selecting herdr via auto-detect prints one loud stderr notice
-# (it is experimental); auto-detecting tmux stays silent - it is today's
-# default-path behavior and callers must see zero change.
+# then runtime auto-detection (fm_backend_detect), then the default zellij (the
+# reference backend since the tmux->zellij migration). A per-task `--backend`
+# flag is parsed by the caller (fm-spawn.sh) and takes precedence over this
+# resolution entirely; it is not read here. Auto-detect fires only when nothing
+# was explicitly configured, so an explicit setting always wins. Selecting herdr
+# via auto-detect prints one loud stderr notice (it is experimental);
+# auto-detecting zellij or tmux stays silent - both are non-experimental
+# backends and callers must see zero change.
 fm_backend_name() {
   local line v detected
   if [ -n "${FM_BACKEND:-}" ]; then
@@ -101,12 +111,12 @@ fm_backend_name() {
   fi
   if detected=$(fm_backend_detect); then
     if [ "$detected" = herdr ]; then
-      echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
+      echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend zellij to opt out." >&2
     fi
     printf '%s' "$detected"
     return 0
   fi
-  printf 'tmux'
+  printf 'zellij'
 }
 
 # fm_backend_validate: refuse an unknown backend LOUDLY. Silent on success.
@@ -182,6 +192,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_HERDR_SOURCED=1
       fi
       ;;
+    zellij)
+      if [ -z "${_FM_BACKEND_ZELLIJ_SOURCED:-}" ]; then
+        # shellcheck source=bin/backends/zellij.sh
+        . "$FM_BACKEND_LIB_DIR/backends/zellij.sh"
+        _FM_BACKEND_ZELLIJ_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -239,6 +256,7 @@ fm_backend_capture() {  # <backend> <target> <lines>
   case "$backend" in
     tmux) fm_backend_tmux_capture "$@" ;;
     herdr) fm_backend_herdr_capture "$@" ;;
+    zellij) fm_backend_zellij_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -251,6 +269,7 @@ fm_backend_send_key() {  # <backend> <target> <key>
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
     herdr) fm_backend_herdr_send_key "$@" ;;
+    zellij) fm_backend_zellij_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -265,6 +284,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
     herdr) fm_backend_herdr_send_text_submit "$@" ;;
+    zellij) fm_backend_zellij_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -279,6 +299,7 @@ fm_backend_kill() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_kill "$@" ;;
     herdr) fm_backend_herdr_kill "$@" ;;
+    zellij) fm_backend_zellij_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -323,6 +344,10 @@ fm_backend_target_exists() {  # <backend> <target>
       pane=${target#*:}
       [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
       HERDR_SESSION="$session" herdr pane get "$pane" >/dev/null 2>&1
+      ;;
+    zellij)
+      fm_backend_source zellij || return 1
+      fm_backend_zellij_target_exists "$target"
       ;;
     *)
       return 1

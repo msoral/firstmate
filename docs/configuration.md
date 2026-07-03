@@ -19,14 +19,14 @@ The file format is unchanged in both modes; tasks-axi and manual edits produce t
 ## Runtime backend (config/backend / FM_BACKEND)
 
 The runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
-`tmux` is the verified reference backend; `herdr` is a second, experimental backend (see `docs/herdr-backend.md`) - treehouse remains the worktree provider for both, since herdr is a session provider only.
-New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX` or `HERDR_ENV=1`, then default `tmux`.
-If both runtime markers are present, `$TMUX` wins because tmux is the innermost surface firstmate is running on.
-Auto-detected herdr prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
-Any value other than `tmux` or `herdr` is rejected until another adapter is implemented and verified.
-A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
-Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
-A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+`zellij` (>=0.44.0, with `jq`) is the default reference backend (see `docs/zellij-backend.md`); `tmux` is a still-selectable non-default backend; `herdr` is a second, experimental backend (see `docs/herdr-backend.md`) - treehouse remains the worktree provider for all three, since each is a session provider only.
+New spawns choose the backend in this order: explicit `fm-spawn.sh --backend <name>`, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `$ZELLIJ`, or `HERDR_ENV=1`, then default `zellij`.
+If several runtime markers are present, `$TMUX` wins because tmux is the innermost surface firstmate is running on.
+Auto-detected herdr prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux or zellij stays silent to preserve existing default behavior.
+Any value other than `zellij`, `tmux`, or `herdr` is rejected until another adapter is implemented and verified.
+A zellij spawn version-gates against zellij >=0.44.0 and requires `jq`, and a herdr spawn version-gates against the installed `herdr` binary's protocol and requires `jq`, each refusing loudly on an incompatible or missing installation.
+Task meta records `backend=` for every non-tmux backend, including the default `zellij`; an absent `backend=` still means `tmux`, preserving the legacy default-path meta files.
+A zellij task additionally records `zellij_session=` and `zellij_pane_id=` (its target string is `<session>:<pane-id>`, e.g. `firstmate:terminal_5`), and a herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 Spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
@@ -36,7 +36,8 @@ The `config/backend` file is not inherited by secondmate homes.
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
-That command requires `tmux` on `PATH`, prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
+That command requires `tmux` on `PATH` (the afk injection e2e tests need it), prints `tmux -V`, runs every `tests/*.test.sh` with `bash`, and fails if any script exits non-zero.
+Within that suite the real backend smoke tests self-gate on their tools: the tmux smoke test needs `tmux`, and the zellij smoke test needs real `zellij` (>=0.44.0), `jq`, and `python3`, skipping otherwise.
 It intentionally mirrors the behavior-test baseline in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) instead of delegating the test step to an agent.
 
 ## Captain preferences (data/captain.md)
@@ -107,7 +108,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ## Toolchain
 
-On session start the first mate detects what its required toolchain is missing or too old (tmux, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+On session start the first mate detects what its required toolchain is missing or too old (zellij >=0.44.0, node, gh, treehouse with durable lease support, no-mistakes v1.31.2 or newer, gh-axi, chrome-devtools-axi, lavish-axi), lists it with the exact install commands, and installs only after you say go.
+The default zellij backend also needs `jq`; `tmux` is no longer unconditionally required and matters only when a task selects the tmux backend.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When X mode is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 Unless `config/backlog-backend=manual`, bootstrap treats `tasks-axi` as the default backlog backend.
@@ -181,7 +183,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_BACKEND=             # optional runtime session-provider backend override for new spawns; tmux (reference) or herdr (experimental)
+FM_BACKEND=             # optional runtime session-provider backend override for new spawns; zellij (default reference), tmux (selectable), or herdr (experimental)
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
@@ -210,7 +212,7 @@ FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working non-
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=20   # seconds allowed for bootstrap's best-effort clone refresh
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
-FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and tmux helper
+FM_BUSY_REGEX='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'   # busy-pane signatures, shared by watcher, fm-crew-state pane fallback, and the tmux and zellij composer libs
 FM_COMPOSER_IDLE_RE=    # optional empty-composer regex, applied after dim-ghost and border stripping
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send Enter-retry attempts after typing the line once

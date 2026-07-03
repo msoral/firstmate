@@ -174,6 +174,7 @@ secondmate_sync() {
 install_cmd() {
   case "$1" in
     tmux|node|gh|curl|jq) echo "brew install $1  # or the platform's package manager" ;;
+    zellij) echo "brew install zellij  # or 'cargo install --locked zellij' / the platform's package manager (need >= $ZELLIJ_MIN_VERSION)" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -182,13 +183,28 @@ install_cmd() {
   esac
 }
 
-TOOLS="tmux node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
+# zellij is the reference session backend (docs/zellij-backend.md), so it is a
+# core required tool; tmux is no longer required unconditionally because it is
+# now an optional, still-selectable backend rather than the default.
+TOOLS="zellij node gh treehouse no-mistakes gh-axi chrome-devtools-axi lavish-axi"
 NO_MISTAKES_MIN_MAJOR=1
 NO_MISTAKES_MIN_MINOR=31
 NO_MISTAKES_MIN_PATCH=2
+# The zellij CLI-automation surface firstmate's adapter relies on (--pane-id
+# targeting, list-panes --json, new-pane returning its id) landed in 0.44.0.
+ZELLIJ_MIN_VERSION="0.44.0"
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+}
+
+# zellij_version_ok: 0 iff the installed zellij is >= ZELLIJ_MIN_VERSION.
+zellij_version_ok() {
+  local ver lowest
+  ver=$(zellij --version 2>/dev/null | awk '{print $2}')
+  [ -n "$ver" ] || return 1
+  lowest=$(printf '%s\n%s\n' "$ZELLIJ_MIN_VERSION" "$ver" | sort -V | head -1)
+  [ "$lowest" = "$ZELLIJ_MIN_VERSION" ]
 }
 
 no_mistakes_version_parts() {
@@ -392,6 +408,9 @@ fi
 for t in $TOOLS; do
   command -v "$t" >/dev/null || echo "MISSING: $t (install: $(install_cmd "$t"))"
 done
+if command -v zellij >/dev/null 2>&1 && ! zellij_version_ok; then
+  echo "MISSING: zellij (install: $(install_cmd zellij))"
+fi
 if command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
   echo "MISSING: treehouse (install: $(install_cmd treehouse))"
 fi

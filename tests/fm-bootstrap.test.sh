@@ -21,7 +21,19 @@ TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
+  # zellij is the reference backend and a core required tool; bootstrap version-
+  # gates it (>= 0.44.0). FM_FAKE_ZELLIJ_VERSION overrides the reported version so
+  # tests can exercise the too-old / missing paths.
+  cat > "$fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_ZELLIJ_VERSION:-zellij 0.44.1}"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/zellij"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then

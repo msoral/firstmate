@@ -12,11 +12,13 @@
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
-#   $TMUX or HERDR_ENV=1; bin/fm-backend.sh's fm_backend_detect), then tmux.
-#   Known backends are the reference tmux adapter and experimental herdr. An
-#   auto-detected herdr spawn prints a loud stderr notice; auto-detected tmux
-#   stays silent. Default tmux spawns do not write backend= to meta; absent
-#   backend= means tmux.
+#   $TMUX, $ZELLIJ, or HERDR_ENV=1; bin/fm-backend.sh's fm_backend_detect), then
+#   the default zellij (the reference backend; docs/zellij-backend.md). Known
+#   backends are zellij (default reference), tmux (still fully selectable), and
+#   the experimental herdr. An auto-detected herdr spawn prints a loud stderr
+#   notice; auto-detected zellij or tmux stays silent. A non-tmux spawn records
+#   its backend= in meta (zellij also records zellij_session=/zellij_pane_id=);
+#   a tmux spawn omits backend= and absent backend= still means tmux.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -606,29 +608,42 @@ EOF
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
+  zellij)
+    # zellij is a pure current-session provider: the pane is created inside
+    # firstmate's own zellij session and addressed by its returned pane id, so
+    # there is no per-home workspace glue like herdr's (docs/zellij-backend.md).
+    # container_ensure runs the version/jq preflight and resolves the session.
+    ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
+    ZELLIJ_PANE_ID=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
+    ;;
 esac
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
     herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
+    zellij) fm_backend_zellij_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() {  # <target>
   case "$BACKEND" in
     tmux) fm_backend_tmux_current_path "$1" ;;
     herdr) fm_backend_herdr_current_path "$1" ;;
+    zellij) fm_backend_zellij_current_path "$1" ;;
   esac
 }
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
     herdr) fm_backend_herdr_send_literal "$1" "$2" ;;
+    zellij) fm_backend_zellij_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_key "$1" "$2" ;;
     herdr) fm_backend_herdr_send_key "$1" "$2" ;;
+    zellij) fm_backend_zellij_send_key "$1" "$2" ;;
   esac
 }
 if [ "$KIND" != secondmate ]; then
@@ -821,6 +836,10 @@ fi
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+  fi
+  if [ "$BACKEND" = zellij ]; then
+    echo "zellij_session=$ZELLIJ_SES"
+    echo "zellij_pane_id=$ZELLIJ_PANE_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
