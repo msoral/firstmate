@@ -11,15 +11,15 @@ All real-herdr verification in this document uses isolated sessions and guarded 
 
 ## Status: experimental
 
-Herdr is experimental, exactly like every non-tmux backend in this design.
+Herdr is the experimental backend in this design, distinct from the default reference backend `zellij` and the still-selectable `tmux`.
 Select it explicitly with `--backend herdr`, `FM_BACKEND=herdr`, or `config/backend` containing `herdr`.
 It can also be selected by runtime auto-detection when firstmate itself is running inside herdr and no explicit backend setting exists.
 Absent those three explicit settings, firstmate falls through to runtime auto-detection.
-When nothing is explicitly configured, `bin/fm-backend.sh`'s `fm_backend_detect` checks the runtime firstmate itself is executing inside: `HERDR_ENV=1` (injected into every process herdr manages a pane for) selects herdr; `$TMUX` (set inside every tmux pane, including a tmux pane nested inside a herdr pane) selects tmux and always wins when both markers are present, since that is the surface firstmate is actually running on.
-An auto-detected herdr spawn prints one loud stderr notice (set `config/backend` or pass `--backend tmux` to opt out).
-Auto-detecting tmux stays silent, since that reproduces today's unconfigured default byte-for-byte.
-Only when none of that resolves anything does firstmate fall back to the hard default, tmux.
-Absent `backend=` in a task's meta always means `tmux`; only a herdr task ever carries an explicit `backend=herdr` line.
+When nothing is explicitly configured, `bin/fm-backend.sh`'s `fm_backend_detect` checks the runtime firstmate itself is executing inside: `HERDR_ENV=1` (injected into every process herdr manages a pane for) selects herdr; `$ZELLIJ` (set in every process inside a zellij session) selects zellij; `$TMUX` (set inside every tmux pane, including a tmux pane nested inside a zellij or herdr pane) selects tmux and always wins when several markers are present, since that is the surface firstmate is actually running on.
+An auto-detected herdr spawn prints one loud stderr notice (set `config/backend` or pass `--backend zellij` to opt out).
+Auto-detecting zellij or tmux stays silent, since neither is experimental.
+Only when none of that resolves anything does firstmate fall back to the default backend, zellij.
+Absent `backend=` in a task's meta still means `tmux` for legacy compatibility; a zellij task records `backend=zellij` and a herdr task records `backend=herdr`.
 A herdr spawn refuses loudly if `herdr` or `jq` is missing, or if the installed herdr's protocol is older than the verified minimum (`fm_backend_herdr_version_check`).
 
 ## Worktree provider stays treehouse
