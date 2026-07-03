@@ -27,14 +27,18 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Require tmux for e2e tests
+      - name: Check tmux for e2e tests
         run: |
           set -eu
-          command -v tmux >/dev/null || {
-            echo "::error::tmux is required for real afk injection e2e coverage"
-            exit 1
-          }
-          tmux -V
+          # zellij is now the default backend; tmux is an optional, still-selectable
+          # backend, so its e2e/smoke tests skip gracefully when tmux is absent. Warn
+          # rather than hard-fail so the suite runs on tmux-less hosts, while GitHub's
+          # runners (which ship tmux) still exercise the real tmux coverage.
+          if command -v tmux >/dev/null; then
+            tmux -V
+          else
+            echo "::warning::tmux not found; tmux e2e/smoke tests will skip"
+          fi
       - run: |
           set -eu
           for test_script in tests/*.test.sh; do
