@@ -116,7 +116,7 @@ fm_backend_zellij_send_key() {  # <target> <key>
   case "$key" in
     Enter)          fm_zellij_action send-keys -p "$pane" Enter ;;
     Escape|Esc)     fm_zellij_action send-keys -p "$pane" Esc ;;
-    C-*)            fm_zellij_action send-keys -p "$pane" Ctrl "${key#C-}" ;;
+    C-*)            fm_zellij_action send-keys -p "$pane" "Ctrl ${key#C-}" ;;
     *)              fm_zellij_action send-keys -p "$pane" "$key" ;;
   esac
 }

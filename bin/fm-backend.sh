@@ -236,7 +236,11 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
       return 0
       ;;
     *)
-      backend=$(fm_backend_name)
+      # Read-only selector resolution, not a spawn: resolve the active backend
+      # name but suppress fm_backend_name's spawn-oriented herdr NOTICE (stderr)
+      # so an ad-hoc bare lookup on a herdr box does not print a misleading
+      # "spawning into the EXPERIMENTAL herdr backend" line.
+      backend=$(fm_backend_name 2>/dev/null)
       case "$backend" in
         zellij)
           fm_backend_source zellij || return 1

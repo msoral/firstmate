@@ -125,7 +125,9 @@ test_send_key_translation() {
   fm_backend_zellij_send_key 'firstmate:terminal_1' Escape
   log_has $'send-keys\x1f-p\x1fterminal_1\x1fEsc' || fail "Escape should map to Esc"
   fm_backend_zellij_send_key 'firstmate:terminal_1' C-c
-  log_has $'send-keys\x1f-p\x1fterminal_1\x1fCtrl\x1fc' || fail "C-c should map to Ctrl c"
+  # A Ctrl-combo must be ONE argument ("Ctrl c"), not two ("Ctrl" then "c") —
+  # verified against real zellij 0.44.1, where the two-arg form does not send ^C.
+  log_has $'send-keys\x1f-p\x1fterminal_1\x1fCtrl c' || fail "C-c should map to a single 'Ctrl c' argument"
   pass "fm_backend_zellij_send_key: Enter/Escape/C-c translated to zellij key names"
 }
 
