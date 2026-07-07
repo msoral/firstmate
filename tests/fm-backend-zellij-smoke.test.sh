@@ -92,8 +92,9 @@ TARGET="$SESSION:$PANE"
 pass "create_task: new-pane returned '$PANE'"
 
 # duplicate refused.
-fm_backend_zellij_create_task "$SESSION" fm-smoke1 "$ROOT" >/dev/null 2>&1 \
-  && fail "create_task should refuse a duplicate label" || true
+if fm_backend_zellij_create_task "$SESSION" fm-smoke1 "$ROOT" >/dev/null 2>&1; then
+  fail "create_task should refuse a duplicate label"
+fi
 pass "create_task: refuses a duplicate label against live panes"
 
 # current_path: the pane's cwd is the repo root.
