@@ -41,6 +41,11 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# Supervisor-target discovery + native-background handoff (load the captain pane
+# the foreground launcher resolved, since THIS entry may run detached with no
+# pane markers in its env).
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$FM_AFK_START_DIR/fm-supervisor-target-lib.sh"
 
 fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -61,9 +66,14 @@ fm_afk_start_usage() {
 # buffered escalations are preserved.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
+  # The native supervisor-target handoff record is session-scoped too: a fresh
+  # entry must not inherit a prior session's captain pane. Cleared BEFORE
+  # fm_afk_launch.sh persists the new one, so a fresh entry that cannot resolve a
+  # pane leaves no stale target behind (the daemon then discovers/warns instead).
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+        "$state/.subsuper-inject-wedged" \
+        "$state/$FM_SUPERVISOR_TARGET_RECORD_NAME" 2>/dev/null
 }
 
 daemon_lock_owner() {
@@ -140,6 +150,14 @@ fm_afk_start_main() {
   if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
     fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
   fi
+
+  # Native-background handoff: the foreground launcher (fm-afk-launch.sh
+  # start-native) resolved the captain pane and persisted it, because THIS entry
+  # may run detached in the harness's native background tool with no TMUX_PANE/
+  # HERDR_PANE_ID to rediscover it. Export it so the daemon injects into the real
+  # captain pane, not the firstmate:0 fallback. An already-set FM_SUPERVISOR_TARGET
+  # (the terminal-backed path passes it on the command line) is left untouched.
+  fm_supervisor_target_load_into_env "$FM_AFK_STATE" || true
 
   echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
   exec "$FM_AFK_DAEMON"

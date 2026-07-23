@@ -31,7 +31,8 @@ batched digest rather than per-wake injections.
      `bin/fm-afk-launch.sh start-native`, then run
      `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
-     The launcher still owns lifecycle state and records the no-terminal mode, while the daemon inherits and auto-discovers the captain pane.
+     The launcher still owns lifecycle state and records the no-terminal mode, and it also hands the resolved captain pane to the daemon.
+     That handoff is required, not redundant: the native background tool runs detached without the captain pane's env, so the daemon cannot rediscover it and would fall back to `firstmate:0` (`docs/afk-inject-delivery.md`).
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
    - **Harness WITHOUT one** (e.g. pi): run `bin/fm-afk-launch.sh start`. It is
@@ -209,6 +210,11 @@ the marker lets firstmate distinguish it from a real captain message.
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - `classify_signal` and terminal `classify_stale` paths check the seen-status marker before escalating, so a captain-relevant status escalated by one path is not re-escalated by another in the same digest.
   The marker does not clear or suppress possible-wedge aging for a nonterminal progress line.
+- **Verify-before-trust startup self-check** - at away-mode entry the daemon proves the resolved pane is actually injectable, so a wrong pane or an unreadable composer alarms within seconds instead of only after the first escalation ages past max-defer.
+  It runs the same read-only gate as an injection (target exists, not busy, composer affirmatively empty) and sends nothing.
+  An idle pane whose composer never reads as a genuine composer, or a target that never resolves, raises the wedge alarm immediately; a pane that stays busy for the whole window is inconclusive and deliberately does not alarm.
+  It never blocks startup, so every durable-recovery property still holds.
+  `docs/afk-inject-delivery.md` owns the verdict rules and evidence.
 - **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
   (tmux vs herdr) and TARGET independently, mirroring
   `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
@@ -223,6 +229,10 @@ the marker lets firstmate distinguish it from a real captain message.
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one
   (docs/herdr-backend.md "Away-mode daemon: herdr supervisor-pane support").
+  On the native-background path the `FM_SUPERVISOR_TARGET` override is supplied
+  by the launcher's persisted handoff rather than by the daemon's own env, since
+  a detached daemon has no pane markers to discover; an explicit override always
+  wins and an unresolvable pane is never persisted as a fallback.
 
 ## Stale-artifact lifecycle
 

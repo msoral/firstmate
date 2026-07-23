@@ -1478,6 +1478,86 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   pass "in-process wedge throttle prevents alert spam when the marker cannot persist"
 }
 
+# --- verify-before-trust startup self-check --------------------------------
+# verify_once_injectable proves the resolved supervisor pane is injectable at
+# away-mode ENTRY, so a wrong target or an idle-unreadable composer alarms within
+# seconds instead of via the max-defer wedge hours later (the 2026-07-21 blind
+# window). Backend probes are stubbed in a subshell so overrides never leak.
+test_verify_once_passes_on_empty_composer() {
+  local dir state rc=0
+  dir=$(make_supercase verify-once-empty); state="$dir/state"; : > "$state/.afk"
+  ( fm_backend_target_exists() { return 0; }; pane_is_busy() { return 1; }
+    fm_backend_composer_state() { echo empty; }
+    FM_VERIFY_ONCE_TRIES=3 FM_VERIFY_ONCE_SLEEP=0.01 verify_once_injectable "$state" "%TGT" tmux ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "verify-once should PASS on an idle empty composer (rc=$rc)"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "verify-once wrote a wedge marker on a healthy pane"
+  pass "verify-once: an idle empty composer confirms injectable, no alarm"
+}
+
+test_verify_once_passes_on_pending_composer() {
+  local dir state rc=0
+  dir=$(make_supercase verify-once-pending); state="$dir/state"; : > "$state/.afk"
+  ( fm_backend_target_exists() { return 0; }; pane_is_busy() { return 1; }
+    fm_backend_composer_state() { echo pending; }
+    FM_VERIFY_ONCE_TRIES=3 FM_VERIFY_ONCE_SLEEP=0.01 verify_once_injectable "$state" "%TGT" tmux ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "verify-once should PASS on a real (pending) composer (rc=$rc)"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "verify-once alarmed on a genuine composer holding text"
+  pass "verify-once: a genuine composer holding text is a valid pane, no alarm"
+}
+
+test_verify_once_alarms_on_idle_unreadable_composer() {
+  local dir state log rc=0
+  dir=$(make_supercase verify-once-unknown); state="$dir/state"; log="$dir/alert.log"; : > "$state/.afk"
+  ( fm_backend_target_exists() { return 0; }; pane_is_busy() { return 1; }
+    fm_backend_composer_state() { echo unknown; }
+    FM_VERIFY_ONCE_TRIES=3 FM_VERIFY_ONCE_SLEEP=0.01 FM_WEDGE_ALARM_LOG="$log" \
+      FM_WEDGE_ALARM_CHANNEL=osascript verify_once_injectable "$state" "%TGT" tmux ) || rc=$?
+  [ "$rc" -eq 1 ] || fail "verify-once should FAIL when an idle composer never reads as a genuine composer (rc=$rc)"
+  grep -F 'verify-once FAILED' "$state/.subsuper-inject-wedged" >/dev/null 2>&1 \
+    || fail "verify-once did not write the durable wedge marker with its reason"
+  grep -F 'osascript' "$log" >/dev/null 2>&1 \
+    || fail "verify-once did not fire the active alert on failure: $(cat "$log" 2>/dev/null)"
+  pass "verify-once: an idle unreadable composer (wrong pane) alarms immediately with a durable marker"
+}
+
+test_verify_once_alarms_when_target_never_resolves() {
+  local dir state log rc=0
+  dir=$(make_supercase verify-once-notarget); state="$dir/state"; log="$dir/alert.log"; : > "$state/.afk"
+  ( fm_backend_target_exists() { return 1; }; pane_is_busy() { return 1; }
+    fm_backend_composer_state() { echo empty; }
+    FM_VERIFY_ONCE_TRIES=3 FM_VERIFY_ONCE_SLEEP=0.01 FM_WEDGE_ALARM_LOG="$log" \
+      FM_WEDGE_ALARM_CHANNEL=osascript verify_once_injectable "$state" "%GONE" tmux ) || rc=$?
+  [ "$rc" -eq 1 ] || fail "verify-once should FAIL when the target never resolves (rc=$rc)"
+  grep -F 'target never resolved' "$state/.subsuper-inject-wedged" >/dev/null 2>&1 \
+    || fail "verify-once marker did not record the unresolved-target reason"
+  grep -F 'osascript' "$log" >/dev/null 2>&1 || fail "verify-once did not fire the active alert on a missing target"
+  pass "verify-once: a target that never resolves alarms immediately (wrong-pane discovery failure)"
+}
+
+test_verify_once_inconclusive_on_persistent_busy() {
+  local dir state rc=0
+  dir=$(make_supercase verify-once-busy); state="$dir/state"; : > "$state/.afk"
+  # Busy for the entire window: a valid agent pane, just occupied. Must NOT alarm
+  # (that would false-positive on a slow away-mode ack); the max-defer net remains.
+  ( fm_backend_target_exists() { return 0; }; pane_is_busy() { return 0; }
+    fm_backend_composer_state() { echo empty; }
+    FM_VERIFY_ONCE_TRIES=3 FM_VERIFY_ONCE_SLEEP=0.01 verify_once_injectable "$state" "%TGT" tmux ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "verify-once should be INCONCLUSIVE (no alarm) on a persistently busy pane (rc=$rc)"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "verify-once false-alarmed on a busy (valid) agent pane"
+  pass "verify-once: a persistently busy pane is inconclusive, not a wedge - no false alarm"
+}
+
+test_verify_once_skips_when_afk_inactive() {
+  local dir state rc=0
+  dir=$(make_supercase verify-once-noafk); state="$dir/state"  # no .afk written
+  ( fm_backend_target_exists() { return 1; }; pane_is_busy() { return 1; }
+    fm_backend_composer_state() { echo unknown; }
+    FM_VERIFY_ONCE_TRIES=3 FM_VERIFY_ONCE_SLEEP=0.01 verify_once_injectable "$state" "%TGT" tmux ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "verify-once should skip (rc=0) when afk is inactive (rc=$rc)"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "verify-once alarmed with no captain present (afk off)"
+  pass "verify-once: skipped when afk is inactive (no captain to protect yet)"
+}
+
 test_fm_send_exits_nonzero_on_confirmed_swallow() {
   # fm-send.sh must exit NON-ZERO when a steer's Enter is positively swallowed
   # (text left in the composer), so firstmate learns the instruction did not land
@@ -1793,6 +1873,12 @@ test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
+test_verify_once_passes_on_empty_composer
+test_verify_once_passes_on_pending_composer
+test_verify_once_alarms_on_idle_unreadable_composer
+test_verify_once_alarms_when_target_never_resolves
+test_verify_once_inconclusive_on_persistent_busy
+test_verify_once_skips_when_afk_inactive
 test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_discover_supervisor_backend_precedence

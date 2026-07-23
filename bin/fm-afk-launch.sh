@@ -539,6 +539,18 @@ fm_afk_launch_start_native() {
   if [ "$result" -eq 0 ]; then
     fm_afk_launch_record_write none - native || result=1
   fi
+  if [ "$result" -eq 0 ]; then
+    # Hand the captain pane off to the background daemon. This launcher runs in
+    # firstmate's own foreground pane, so discover_supervisor_target resolves the
+    # real captain pane here; the daemon is exec'd later THROUGH the harness's
+    # native background tool with no pane markers in its env, so without this it
+    # would fall back to firstmate:0. Best-effort: if the pane is not resolvable
+    # even here, leave the daemon its own discovery-plus-warning path (and its
+    # verify-once startup self-check will surface any resulting wedge loudly).
+    if ! fm_supervisor_target_persist "$FM_AFK_LAUNCH_STATE"; then
+      fm_afk_launch_log "could not resolve the captain pane to hand off (no TMUX_PANE/HERDR_PANE_ID here); the daemon will auto-discover and verify at startup"
+    fi
+  fi
   if [ "$result" -ne 0 ]; then
     fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
   else
@@ -588,7 +600,10 @@ fm_afk_launch_stop() {
   if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_close_recorded || result=1
   fi
-  # (3) Clear the away-mode flag LAST.
+  # (3) Drop the session-scoped native supervisor-target handoff record (a pure
+  # daemon input, safe to remove once the daemon is down).
+  rm -f "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISOR_TARGET_RECORD_NAME" 2>/dev/null || true
+  # (4) Clear the away-mode flag LAST.
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear away-mode flag"
     result=1

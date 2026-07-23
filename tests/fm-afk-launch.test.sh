@@ -462,6 +462,131 @@ unit_native_entry_preserves_prepared_state() {
   rm -rf "$st"
 }
 
+# ---------------------------------------------------------------------------
+# NATIVE SUPERVISOR-TARGET HANDOFF: on the claude/grok native-background path the
+# launcher runs in the captain's OWN foreground pane but the daemon is exec'd
+# later THROUGH a detached native background tool with no pane markers. The
+# launcher must persist the resolved captain pane so the daemon entry can hand it
+# to the daemon as FM_SUPERVISOR_TARGET instead of falling back to firstmate:0.
+# ---------------------------------------------------------------------------
+unit_native_persists_and_clears_supervisor_target() {
+  local st rec
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-persist.XXXXXX")
+  mkdir -p "$st/state"
+  # start-native run in a pane context (TMUX_PANE set) resolves and persists it.
+  TMUX_PANE="%55" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1
+  rec=$(cat "$st/state/.afk-supervisor-target" 2>/dev/null || true)
+  if [ "$rec" = "$(printf 'tmux\t%%55')" ]; then
+    pass "native handoff: launcher persists the resolved captain pane for the detached daemon"
+  else
+    fail "native handoff: expected 'tmux<TAB>%%55', got '$rec'"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  if [ ! -e "$st/state/.afk-supervisor-target" ]; then
+    pass "native handoff: stop clears the supervisor-target handoff record"
+  else
+    fail "native handoff: handoff record survived stop"
+  fi
+  rm -rf "$st"
+}
+
+unit_native_undiscoverable_skips_persist() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-nopane.XXXXXX")
+  mkdir -p "$st/state"
+  # No pane markers: discovery falls back to firstmate:0, which must NOT be
+  # persisted - the daemon keeps its own discovery + warning path instead.
+  env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV -u FM_SUPERVISOR_TARGET \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1
+  if [ ! -e "$st/state/.afk-supervisor-target" ]; then
+    pass "native handoff: an unresolvable pane writes NO handoff record (no bogus firstmate:0)"
+  else
+    fail "native handoff: wrote a fallback record '$(cat "$st/state/.afk-supervisor-target" 2>/dev/null)'"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st"
+}
+
+unit_native_entry_loads_handoff_into_env() {
+  local st probe runner
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-handoff.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'tmux\t%%77\n' > "$st/state/.afk-supervisor-target"
+  # Fake daemon: record the FM_SUPERVISOR_* env the entry hands it, then exit.
+  probe=$(mktemp "${TMPDIR:-/tmp}/fm-afk-probe.XXXXXX")
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\t%s\n' "$FM_SUPERVISOR_TARGET" "$FM_SUPERVISOR_BACKEND" > "$FM_PROBE_OUT"
+SH
+  chmod +x "$probe"
+  # Source the entry, point it at the probe instead of the real daemon, run main.
+  runner=$(mktemp "${TMPDIR:-/tmp}/fm-afk-runner.XXXXXX")
+  cat > "$runner" <<'SH'
+#!/usr/bin/env bash
+. "$1"
+FM_AFK_DAEMON="$2"
+fm_afk_start_main
+SH
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 FM_PROBE_OUT="$st/out" \
+    env -u TMUX_PANE -u HERDR_PANE_ID -u HERDR_ENV -u FM_SUPERVISOR_TARGET \
+    bash "$runner" "$START" "$probe" >/dev/null 2>&1
+  if [ "$(cat "$st/out" 2>/dev/null || true)" = "$(printf '%%77\ttmux')" ]; then
+    pass "native handoff: detached daemon entry exports the persisted captain pane into FM_SUPERVISOR_TARGET"
+  else
+    fail "native handoff: entry did not load the persisted target (got '$(cat "$st/out" 2>/dev/null || true)')"
+  fi
+  rm -rf "$st" "$probe" "$runner"
+}
+
+unit_native_handoff_respects_explicit_target() {
+  local st out runner
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-explicit.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'herdr\tsess:%%9\n' > "$st/state/.afk-supervisor-target"
+  # The terminal-backed path passes FM_SUPERVISOR_TARGET on the daemon command
+  # line; the record must never override an explicit value.
+  runner=$(mktemp "${TMPDIR:-/tmp}/fm-afk-explicit-run.XXXXXX")
+  cat > "$runner" <<'SH'
+#!/usr/bin/env bash
+. "$1"
+FM_SUPERVISOR_TARGET="%3"
+FM_SUPERVISOR_BACKEND=tmux
+fm_supervisor_target_load_into_env "$2" || true
+printf '%s\t%s' "$FM_SUPERVISOR_TARGET" "$FM_SUPERVISOR_BACKEND"
+SH
+  out=$(bash "$runner" "$ROOT/bin/fm-supervisor-target-lib.sh" "$st/state")
+  if [ "$out" = "$(printf '%%3\ttmux')" ]; then
+    pass "native handoff: an explicit FM_SUPERVISOR_TARGET is never overridden by the record"
+  else
+    fail "native handoff: explicit target overridden (got '$out')"
+  fi
+  rm -rf "$st" "$runner"
+}
+
+unit_native_handoff_declines_malformed_record() {
+  local st out runner
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-bad.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'zellij\tbogus\n' > "$st/state/.afk-supervisor-target"
+  runner=$(mktemp "${TMPDIR:-/tmp}/fm-afk-bad-run.XXXXXX")
+  cat > "$runner" <<'SH'
+#!/usr/bin/env bash
+. "$1"
+if fm_supervisor_target_load_into_env "$2"; then echo "loaded"; else echo "declined"; fi
+printf 'target=%s' "${FM_SUPERVISOR_TARGET:-}"
+SH
+  out=$(env -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u FM_SUPERVISOR_TARGET \
+    bash "$runner" "$ROOT/bin/fm-supervisor-target-lib.sh" "$st/state")
+  if [ "$out" = "$(printf 'declined\ntarget=')" ]; then
+    pass "native handoff: a record naming an unsupported backend is declined, env left untouched"
+  else
+    fail "native handoff: malformed record not declined cleanly (got '$out')"
+  fi
+  rm -rf "$st" "$runner"
+}
+
 unit_close_failure_preserves_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-close-fail.XXXXXX")
@@ -877,6 +1002,11 @@ unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
+unit_native_persists_and_clears_supervisor_target
+unit_native_undiscoverable_skips_persist
+unit_native_entry_loads_handoff_into_env
+unit_native_handoff_respects_explicit_target
+unit_native_handoff_declines_malformed_record
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed
