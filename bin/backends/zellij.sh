@@ -208,15 +208,32 @@ fm_backend_zellij_cli() {  # <session> <action-subcommand-and-args...>
   ZELLIJ_SESSION_NAME="$session" zellij --session "$session" "$@"
 }
 
+# fm_backend_zellij_live_sessions: the bare name of every LIVE (non-exited)
+# zellij session, one per line. A session whose server has stopped but whose
+# serialized state survives is listed as
+# "<name> [Created ...] (EXITED - attach to resurrect)" and is a DEAD session
+# for our purposes: `list-sessions --short` collapses it to a bare name
+# indistinguishable from a live one (verified real zellij 0.44.1,
+# docs/zellij-backend.md "Dead-session detection"), so this parses the FULL
+# --no-formatting listing instead and drops any line carrying the EXITED
+# marker, printing only the surviving live names. The session name is the
+# first whitespace-delimited field (zellij forbids spaces in session names).
+fm_backend_zellij_live_sessions() {
+  zellij list-sessions --no-formatting 2>/dev/null \
+    | awk 'index($0, "(EXITED") == 0 && $1 != "" { print $1 }'
+}
+
 # fm_backend_zellij_session_exists: passive, READ-ONLY liveness check - never
 # starts or creates a session (unlike herdr's target_ready, which DOES
 # auto-start its server: a herdr server restart is non-destructive and
 # recovers persisted state, but zellij's `kill-session` is destructive and
 # recreating an unrelated target session under the same name would silently
-# orphan whatever the caller actually meant to reach). Every op below calls
-# this first and fails rather than guessing.
+# orphan whatever the caller actually meant to reach). True ONLY for a LIVE
+# session: an EXITED husk is treated as dead (fm_backend_zellij_live_sessions)
+# so server_ensure recreates it rather than every later op failing "Session
+# not found". Every op below calls this first and fails rather than guessing.
 fm_backend_zellij_session_exists() {  # <session>
-  zellij list-sessions --short --no-formatting 2>/dev/null | grep -qxF "$1"
+  fm_backend_zellij_live_sessions | grep -qxF "$1"
 }
 
 # fm_backend_zellij_server_ensure: create the named session in the background,
@@ -225,9 +242,24 @@ fm_backend_zellij_session_exists() {  # <session>
 # Verified: `zellij attach -b <name>` with stdin redirected from /dev/null and
 # no controlling TTY creates the session and returns promptly (it cannot
 # actually attach without a TTY, so it exits after creating); running it again
-# against an EXISTING session prints "Session already exists" and exits 1 -
+# against an EXISTING live session prints "Session already exists" and exits 1 -
 # harmless here because existence is checked first and the launch is
 # backgrounded, its exit status never inspected.
+#
+# Dead-session handling (verified real zellij 0.44.1, docs/zellij-backend.md
+# "Dead-session detection"): when the name is not live it may survive as an
+# EXITED husk, and `attach -b` RESURRECTS that husk rather than building a
+# fresh session. We deliberately do NOT `delete-session` the husk first: that
+# would irreversibly discard an operator's serialized session state (tab
+# layout, scrollback, restore info) on what is by default the SHARED
+# "firstmate" session name. Resurrection has one behavioural consequence we
+# must handle - a resurrected session silently ignores a new tab's --cwd - and
+# that is guaranteed at create time instead (fm_backend_zellij_ensure_pane_cwd,
+# called from create_task), so the worktree cwd is correct regardless of
+# whether firstmate or an operator resurrected the session. The other
+# consequence (resurrection also restores this home's stale task tabs) is a
+# documented known gap for this experimental backend, not a silent corruption -
+# see docs/zellij-backend.md "Known gaps".
 fm_backend_zellij_server_ensure() {  # <session>
   local session=$1 i
   fm_backend_zellij_session_exists "$session" && return 0
@@ -281,6 +313,28 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
     | jq -e --argjson p "$pane_id" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1
 }
 
+# FM_BACKEND_ZELLIJ_NAME_MATCH_JQ: a jq prelude defining
+# fm_name_matches(name; want) - true when a live tab's rendered .name is the
+# firstmate title `want`, tolerating decoration a zellij tab-bar/status plugin
+# may APPEND to the name. Verified real finding (docs/zellij-backend.md
+# "Tab-name decoration"): such a plugin suffixes dynamic status glyphs to the
+# tab name, so an exact `.name == want` equality fails and every
+# fm-send/fm-crew-state/fm-teardown target lookup that depends on it stops
+# resolving a live, healthy pane. A firstmate title is drawn only from
+# [A-Za-z0-9_-] (the "fm-" prefix, the home tag, the task id), so a name
+# matches when it equals the title exactly OR begins with it and the very next
+# character is a decoration boundary - anything outside that title charset,
+# e.g. a space or a status glyph. Anchoring on that boundary is what keeps a
+# title like "fm-h-task1" from matching a decorated "fm-h-task10 *". Every
+# `.name`-equality site below routes through this one predicate.
+# $name/$want are jq variables, deliberately literal to the shell.
+# shellcheck disable=SC2016
+FM_BACKEND_ZELLIJ_NAME_MATCH_JQ='def fm_name_matches($name; $want):
+  ($name == $want)
+  or (($name | startswith($want))
+      and (($name[($want | length):($want | length) + 1]) | test("[A-Za-z0-9_-]") | not));
+'
+
 # fm_backend_zellij_tab_matches_label: does <tab_id> in <session> carry the
 # tab name firstmate expects for the caller-facing task label <label>?
 # Checks the home-scoped, tagged title first (fm_backend_zellij_scoped_title
@@ -292,20 +346,73 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
 # same-named tab from a different firstmate home sharing this one zellij
 # session) refuses rather than silently trusting whichever one happened to
 # match - the migration posture documented in docs/zellij-backend.md
-# "Home-scoped tab titles". One list-tabs call serves every check here (the
-# scoped check, the bare check, and the ambiguity count all read the SAME
-# already-fetched JSON), so a caller whose fake-CLI fixture supplies exactly
-# one list-tabs response keeps working unchanged.
+# "Home-scoped tab titles". Every name comparison here tolerates decoration a
+# tab-bar plugin may append (FM_BACKEND_ZELLIJ_NAME_MATCH_JQ), so a live,
+# healthy pane still resolves through its decorated tab name. One list-tabs
+# call serves every check here (the scoped check, the bare check, and the
+# ambiguity count all read the SAME already-fetched JSON), so a caller whose
+# fake-CLI fixture supplies exactly one list-tabs response keeps working
+# unchanged.
 fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
   local session=$1 tab_id=$2 label=$3 scoped tabs count
   scoped=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
-  printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$scoped" \
-    '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 && return 0
-  printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$label" \
-    '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 || return 1
-  count=$(printf '%s' "$tabs" | jq -r --arg want "$label" '[.[]? | select(.name == $want)] | length' 2>/dev/null)
+  printf '%s' "$tabs" | jq -e "$FM_BACKEND_ZELLIJ_NAME_MATCH_JQ"'[.[]? | select(.tab_id == $t and fm_name_matches(.name; $want))] | length > 0' \
+    --argjson t "$tab_id" --arg want "$scoped" >/dev/null 2>&1 && return 0
+  printf '%s' "$tabs" | jq -e "$FM_BACKEND_ZELLIJ_NAME_MATCH_JQ"'[.[]? | select(.tab_id == $t and fm_name_matches(.name; $want))] | length > 0' \
+    --argjson t "$tab_id" --arg want "$label" >/dev/null 2>&1 || return 1
+  count=$(printf '%s' "$tabs" | jq -r "$FM_BACKEND_ZELLIJ_NAME_MATCH_JQ"'[.[]? | select(fm_name_matches(.name; $want))] | length' --arg want "$label" 2>/dev/null)
   [ "$count" = "1" ]
+}
+
+# fm_backend_zellij_pane_cwd: the reported cwd of terminal pane <pane_id> in
+# <session>, or empty. Reliable HERE - a brand-new pane's OWN top-level shell,
+# before it has launched any nested subshell - which is NOT the frozen-subshell
+# case fm_backend_zellij_current_path works around (docs/zellij-backend.md
+# "Worktree-path discovery: pane_cwd does not track a subshell").
+fm_backend_zellij_pane_cwd() {  # <session> <pane_id>
+  local session=$1 pane_id=$2
+  fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null \
+    | jq -r --argjson p "$pane_id" '.[]? | select(.id == $p and .is_plugin == false) | .pane_cwd' 2>/dev/null | head -1
+}
+
+# fm_backend_zellij_ensure_pane_cwd: guarantee terminal pane <pane_id> in
+# <session> is sitting in <want_cwd>, whether or not `new-tab --cwd` took
+# effect. In a FRESH session --cwd is honored, so the pane already reports
+# want_cwd and this sends nothing; in a RESURRECTED session --cwd is silently
+# ignored (verified), so the pane starts elsewhere and we establish the cwd
+# explicitly. This is what makes the worktree cwd correct regardless of who
+# resurrected the session (see server_ensure).
+#
+# Fail-closed and LOUD: if the cwd cannot be confirmed, return non-zero so
+# create_task refuses the spawn rather than handing back a tab in the wrong
+# project directory (the original bug). pane_cwd derives from the pane's child
+# process and can read empty for a moment on a just-created pane, so a bounded
+# initial poll waits for it to populate and NEVER treats a transient empty read
+# as "already correct". Each establish attempt clears the input line first
+# (Ctrl u) so a retry cannot concatenate onto a previous attempt's leftover,
+# and every attempt submits a complete `cd` line, so the shell is back at a
+# clean prompt before the next one.
+fm_backend_zellij_ensure_pane_cwd() {  # <session> <pane_id> <want_cwd>
+  local session=$1 pane_id=$2 want=$3 i got escaped
+  for i in $(seq 1 10); do
+    got=$(fm_backend_zellij_pane_cwd "$session" "$pane_id")
+    [ "$got" = "$want" ] && return 0
+    [ -n "$got" ] && break   # populated but wrong (resurrected session ignored --cwd)
+    sleep 0.3
+  done
+  escaped=${want//\'/\'\\\'\'}
+  for i in $(seq 1 5); do
+    fm_backend_zellij_cli "$session" action send-keys --pane-id "$pane_id" "Ctrl u" >/dev/null 2>&1 || true
+    sleep 0.2
+    fm_backend_zellij_cli "$session" action paste --pane-id "$pane_id" -- "cd -- '$escaped'" >/dev/null 2>&1
+    fm_backend_zellij_cli "$session" action send-keys --pane-id "$pane_id" Enter >/dev/null 2>&1
+    sleep 0.4
+    got=$(fm_backend_zellij_pane_cwd "$session" "$pane_id")
+    [ "$got" = "$want" ] && return 0
+  done
+  echo "error: could not establish cwd '$want' for zellij pane $pane_id in session '$session'" >&2
+  return 1
 }
 
 # fm_backend_zellij_create_task: create the task's tab (one terminal pane) in
@@ -330,7 +437,7 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   fm_backend_zellij_session_exists "$session" || { echo "error: zellij session '$session' does not exist; run container_ensure first" >&2; return 1; }
   title=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
-  dup=$(printf '%s' "$tabs" | jq -r --arg want "$title" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null | head -1)
+  dup=$(printf '%s' "$tabs" | jq -r "$FM_BACKEND_ZELLIJ_NAME_MATCH_JQ"'.[]? | select(fm_name_matches(.name; $want)) | .tab_id' --arg want "$title" 2>/dev/null | head -1)
   if [ -n "$dup" ]; then
     echo "error: zellij tab '$title' already exists in session '$session'" >&2
     return 1
@@ -346,6 +453,13 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
   if [ -z "$pane_id" ]; then
     echo "error: could not find a terminal pane for zellij tab $tab_id (session '$session')" >&2
+    return 1
+  fi
+  # Guarantee the pane actually landed in the requested cwd (a resurrected
+  # session ignores new-tab --cwd). Refuse loudly rather than hand back a tab in
+  # the wrong directory, and close the tab we just created so a retry is clean.
+  if ! fm_backend_zellij_ensure_pane_cwd "$session" "$pane_id" "$cwd"; then
+    fm_backend_zellij_cli "$session" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
     return 1
   fi
   if [ -n "$prev_active" ] && [ "$prev_active" != "$tab_id" ]; then
@@ -567,9 +681,10 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
 # titles"). A pre-migration task is still reachable through its recorded
 # window= meta, which target_ready/kill DO accept via that bare-title
 # fallback. One "<session>:<pane_id>\t<plain fm-<id> label>" line per live,
-# in-home task tab (the home tag is stripped back off before printing, so
-# callers see the same plain label they always have). Read-only: a session
-# that does not exist yet simply lists nothing.
+# in-home task tab (the home tag is stripped back off the front, and any
+# decoration a tab-bar plugin appended is stripped off the end, so callers see
+# the same plain label they always have). Read-only: a session that does not
+# exist yet simply lists nothing.
 fm_backend_zellij_list_live() {  # <session>
   local session=$1 home prefix tabs tab_id name pane_id plain
   fm_backend_zellij_session_exists "$session" || return 0
@@ -579,6 +694,12 @@ fm_backend_zellij_list_live() {  # <session>
   while IFS=$'\t' read -r tab_id name; do
     [ -n "$tab_id" ] || continue
     plain=${name#"$prefix"}
+    # Drop any appended tab-bar-plugin decoration. Use the SAME ASCII title
+    # charset the jq predicate FM_BACKEND_ZELLIJ_NAME_MATCH_JQ anchors on
+    # ([A-Za-z0-9_-]), NOT the locale-dependent [:alnum:] (which, in a UTF-8
+    # locale, keeps non-ASCII alphanumerics and would disagree with the
+    # predicate). Trim from the first char outside that set onward.
+    plain=${plain%%[!A-Za-z0-9_-]*}
     [ -n "$plain" ] || continue
     pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
@@ -590,10 +711,13 @@ fm_backend_zellij_list_live() {  # <session>
 # an ad hoc selector with no meta (mirrors tmux's list-windows grep and
 # herdr's equivalent). Searches every active zellij session for a tab
 # matching <name>: the home-scoped, tagged title first
-# (fm_backend_zellij_scoped_title), then falls back to an exact bare <name>
-# match ONLY when unambiguous - exactly one tab across every active session
-# carries it - mirroring fm_backend_zellij_tab_matches_label's migration
-# posture. Rare path in practice (zellij tasks normally carry meta);
+# (fm_backend_zellij_scoped_title), then falls back to a bare <name> match ONLY
+# when unambiguous - exactly one tab across every active session carries it -
+# mirroring fm_backend_zellij_tab_matches_label's migration posture. Both
+# matches tolerate decoration a tab-bar plugin may append
+# (FM_BACKEND_ZELLIJ_NAME_MATCH_JQ). Only LIVE sessions are searched
+# (fm_backend_zellij_live_sessions): querying an EXITED session's tabs would
+# resurrect it. Rare path in practice (zellij tasks normally carry meta);
 # best-effort. Not wired into fm_backend_resolve_selector's dispatcher
 # (bin/fm-backend.sh), mirroring herdr: that bare-selector fallback stays
 # tmux-only by design, and zellij/herdr tasks are targeted via task-selector
@@ -601,11 +725,11 @@ fm_backend_zellij_list_live() {  # <session>
 fm_backend_zellij_resolve_bare_selector() {  # <name>
   local name=$1 scoped sessions session tabs tab_id count=0 pane_id bare_session='' bare_tab_id=''
   scoped=$(fm_backend_zellij_scoped_title "$name")
-  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null)
+  sessions=$(fm_backend_zellij_live_sessions)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
-    tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$scoped" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null | head -1)
+    tab_id=$(printf '%s' "$tabs" | jq -r "$FM_BACKEND_ZELLIJ_NAME_MATCH_JQ"'.[]? | select(fm_name_matches(.name; $want)) | .tab_id' --arg want "$scoped" 2>/dev/null | head -1)
     [ -n "$tab_id" ] || continue
     pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
@@ -625,7 +749,7 @@ EOF
         bare_tab_id=$tab_id
       fi
     done <<EOF_MATCHES
-$(printf '%s' "$tabs" | jq -r --arg want "$name" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null)
+$(printf '%s' "$tabs" | jq -r "$FM_BACKEND_ZELLIJ_NAME_MATCH_JQ"'.[]? | select(fm_name_matches(.name; $want)) | .tab_id' --arg want "$name" 2>/dev/null)
 EOF_MATCHES
   done <<EOF
 $sessions

@@ -93,7 +93,7 @@ Zellij tasks additionally record:
 |---|---|---|
 | Version gate | `zellij --version` -> `"zellij 0.44.0"` | Session-independent; no server needs to be running. |
 | Headless session start | `zellij attach -b <name>` with stdin redirected from `/dev/null` and no controlling TTY | Creates the session and returns promptly (cannot actually attach without a TTY, so it exits after creating). The session persists with zero attached clients - `dump-screen`, `list-panes`, etc. all work against it. Running it again against an EXISTING session prints `"Session already exists"` and exits 1 - harmless, since existence is checked first via `list-sessions` and the launch call's own exit status is never inspected. |
-| Session existence check | `zellij list-sessions --short --no-formatting` | Plain one-name-per-line output, safe to `grep -qxF`. Passive - never starts a session (unlike herdr's `target_ready`, which DOES auto-start: a herdr server restart is non-destructive and recovers persisted state, but zellij's `kill-session` is destructive, so auto-recreating under an unexpected name would silently orphan whatever the caller meant to reach). |
+| Session existence check | `zellij list-sessions --no-formatting`, match the session name as the first field on a line with no `(EXITED` marker | Passive - never starts a session (unlike herdr's `target_ready`, which DOES auto-start: a herdr server restart is non-destructive and recovers persisted state, but zellij's `kill-session` is destructive, so auto-recreating under an unexpected name would silently orphan whatever the caller meant to reach). **NOT `--short`:** `--short` collapses a stopped-but-resurrectable EXITED session to a bare name indistinguishable from a live one, so it was wrongly counted alive - see "Dead-session detection" below. |
 | Duplicate task check | `zellij action list-tabs --json`, match by home-scoped `.name` | Zellij does NOT enforce tab-name uniqueness itself (verified: two tabs can share a name, same as herdr's tabs). The adapter's own duplicate check is required, and it checks the home-scoped title such as `fm-firstmate-a1b2c3d4-<id>` (see "Home-scoped tab titles" above), never the bare `fm-<id>` label. |
 | Create task tab | `zellij action new-tab --cwd <dir> --name <scoped-title>` | Returns the created tab's bare integer id on stdout, exactly as documented (resolves report gap #3). No `--no-focus`-equivalent flag exists at all - see "Focus-steal on new-tab" below. The caller passes `fm-<id>`, but the adapter creates `fm-<home-label>-<id>`. |
 | Pane discovery | `zellij action list-panes --json`, filter `.tab_id == <id> and .is_plugin == false` | `tab_id`, `id` (the pane's own bare integer id), `is_plugin`, and `pane_cwd` are ALL present in the default `--json` output with no extra flags (`--tab`/`--geometry`/`--state`/`--command` add more fields but are not needed here). Terminal (non-plugin) pane ids are globally unique across a session's whole tab set - a SEPARATE incrementing namespace from plugin panes, which is why a plugin pane and a terminal pane can share the same bare `id` (the CLI's own `--pane-id` contract, `"3 (equivalent to terminal_3)"`, already documents this split). |
@@ -212,6 +212,60 @@ The one real bug this pass caught - the `pane_cwd`-does-not-track-a-subshell gap
 
 The isolated zellij session and the scratch `FM_HOME`/project were fully torn down after this run (`zellij delete-session <isolated> --force`, `rm -rf` on the scratch root); the real `firstmate` session name and the live tmux/herdr fleet were never touched at any point.
 
+## Dead-session detection (EXITED sessions are dead)
+
+A zellij session whose server has stopped but whose serialized state survives is DEAD-but-resurrectable, not alive.
+The original `session_exists` used `list-sessions --short`, which collapses such a session to a bare name indistinguishable from a live one, so it was counted alive: `server_ensure` then never rebuilt it and every later op failed "Session not found".
+Worse, when `server_ensure` DID reach a dead husk, `attach -b` RESURRECTS it (restoring the old tabs) rather than creating a fresh session - and a resurrected session silently ignores a new tab's `--cwd`, so a crew would spawn in the wrong directory.
+
+The fix has two parts:
+
+1. **Detection.** `session_exists` (via `fm_backend_zellij_live_sessions`) parses the full `--no-formatting` listing and treats any `(EXITED` line as dead, so `server_ensure` actually rebuilds a dead session.
+2. **Rebuild without destroying operator state.** `server_ensure` rebuilds a dead session by letting `attach -b` **resurrect** it - it does **not** `delete-session` the husk first.
+   Deleting would be simpler (a resurrected session, unlike a fresh one, ignores `new-tab --cwd`), but it irreversibly discards an operator's serialized session state (tab layout, scrollback, restore info) on what is by default the *shared* `firstmate` session name, so it was rejected as too destructive on a shared resource.
+   The `--cwd`-ignored consequence is handled where it belongs instead: `create_task` guarantees the worktree cwd itself via `fm_backend_zellij_ensure_pane_cwd`, which reads the new pane's `pane_cwd` (reliable for a brand-new top-level shell) and, only if it does not already match, establishes it with an explicit `cd` and re-verifies.
+   That makes the cwd correct regardless of *who* resurrected the session (firstmate via `attach -b`, or an operator by hand), and it fails loudly rather than handing back a tab in the wrong directory.
+
+Resurrection's other consequence - it also restores this home's stale task tabs - is a documented known gap, not silent corruption; see "Known gaps".
+
+Verified against the real installed binary (zellij 0.44.1, Linux x86_64, 2026-07-23; commands run from a scratch shell, unique throwaway session names only):
+
+```
+$ zellij list-sessions --no-formatting        # a killed (exited) session
+blossoming-ukulele [Created 7days 2h 12m 29s ago] (current)
+firstmate [Created 7days 1h 9m 3s ago]
+fmtest-repro-1620748 [Created 2m 44s ago]
+fmtest-repro2-1622809 [Created 1m 30s ago] (EXITED - attach to resurrect)
+
+$ zellij list-sessions --short --no-formatting  # --short HIDES the EXITED marker (the bug)
+blossoming-ukulele
+firstmate
+fmtest-repro-1620748
+fmtest-repro2-1622809
+
+$ zellij delete-session fmtest-repro2-1622809   # removes only the exited husk
+$ echo $?
+0
+$ zellij delete-session fmtest-repro-1620748     # REFUSES a LIVE session without --force
+$ echo $?
+1
+```
+
+The `delete-session` behavior above (removes only an exited session, refuses a live one without `--force`) is recorded as verified context; the adapter no longer calls it, having chosen the non-destructive resurrect path instead.
+
+## Tab-name decoration (matching tolerates appended status glyphs)
+
+A zellij tab-bar/status plugin APPENDS dynamic status glyphs to the rendered tab name.
+`list-tabs --json`'s `.name` then carries that decoration, so the original exact `.name == want` equality in `fm_backend_zellij_tab_matches_label` failed against a live, healthy pane - and `fm-send`, `fm-crew-state`, and `fm-teardown`'s kill all stopped resolving their targets.
+
+The fix (`FM_BACKEND_ZELLIJ_NAME_MATCH_JQ`, one shared jq predicate used at every `.name`-equality site): a firstmate title is drawn only from `[A-Za-z0-9_-]` (the `fm-` prefix, the home tag, the task id), so a name matches when it equals the title exactly OR begins with it and the very next character is a decoration boundary - anything outside that title charset (a space or a glyph).
+Anchoring on that boundary is what keeps a title like `fm-h-task1` from matching a decorated `fm-h-task10 *`.
+`list_live` additionally strips a trailing decoration run off the emitted plain label.
+
+Covered in `tests/fm-backend-zellij.test.sh` (decorated home-scoped title, decorated legacy bare title, the `fm-task1` vs `fm-task10` prefix-collision guard, the preserved 2+ live-tab ambiguity guard, and `list_live` decoration stripping).
+The matching predicate itself was checked against real `jq` (1.8.1) across the same edge cases.
+A real-zellij assertion is deliberately NOT added: `rename-tab` only renames the *focused* tab, whose semantics are unreliable in a headless no-client smoke session, so a live decoration assertion would be flaky rather than authoritative.
+
 ## Known gaps left for a follow-up
 
 - **No event push at all**, not even herdr's semantic busy-state (D5): zellij has no analogue to herdr's `agent.get`, so `fm-watch.sh`'s existing pane-hash + `FM_BUSY_REGEX` poll loop is the ONLY event source for this backend, identical to the tmux path. This is the expected, designed-for outcome (D5 explicitly calls for "the poll-based capture/hash/busy-regex path, same vocabulary as tmux"), not a shortfall relative to the report.
@@ -221,4 +275,5 @@ The isolated zellij session and the scratch `FM_HOME`/project were fully torn do
 - **A pane can still die after `target_ready` succeeds and before the operation runs.** Metadata-routed operations now verify the expected caller-facing `fm-<id>` label through the home-scoped-title or unambiguous legacy-title check, as well as the pane id up front, but zellij's unconditional exit 0 still leaves this narrow time-of-check/time-of-use race for one-shot operations (see "Unconditional exit code 0" above).
 - **The `pwd`-probe workaround for worktree-path discovery is scoped to `fm-spawn.sh`'s own poll loop only** (see "Worktree-path discovery" above). It is not a general-purpose live-cwd primitive; a future caller needing a live cwd read for a zellij pane outside that narrow spawn-time context would need the same active-probe approach, not a passive JSON field.
 - **No per-home container split**, unlike herdr's later P3 refinement (`docs/herdr-backend.md` "Default task container shape"). This is a deliberate simplicity choice per the locked captain decision (D2: "zellij, content unchanged from the report"), not an oversight; if a captain later runs many concurrent secondmates on the zellij backend and wants per-home visual separation in the tab bar, that would be a natural follow-up mirroring herdr's workspace-per-home pass. Note this is a CONTAINER-level (visual tab-bar grouping) gap only - the cross-home NAME-collision gap this shared container shape used to carry (two homes' same-id tabs sending/peeking/closing each other) is closed by home-scoped tab titles, "Home-scoped tab titles" above.
+- **Resurrecting a dead session restores this home's stale task tabs.** Because `server_ensure` rebuilds a dead session by resurrecting it rather than deleting the husk (see "Dead-session detection" - deleting would discard an operator's serialized state on the shared default name), a reboot that kills the zellij server leaves EXITED husks, and the next `attach -b` restores the previous life's `fm-<home-label>-<id>` tabs as dead shells. Concrete consequence: a recovery relaunch of the same task id can hit `create_task`'s duplicate-name refusal ("tab already exists"), and `list_live` can report a dead restored tab as a live task. This is a loud, recoverable failure (an operator kills or clears the stale session), not silent corruption, and it only arises on the zellij backend after a full server death - acceptable for an experimental backend the fleet does not run on. A future pass could scope-clean this home's own tags on the just-resurrected path (safe only there, since an already-live session's same-tagged tabs may be live crewmates), mirroring the care the home-scoped-title work already takes.
 - **The untagged-legacy migration fallback has one residual ambiguity gap.** `fm_backend_zellij_tab_matches_label`'s bare-title fallback (for a tab spawned before home-scoping shipped) refuses rather than guesses when 2+ live tabs share the exact same untagged bare title - but a genuinely ambiguous case then requires manual intervention (tear down and respawn to get a new home-scoped title) rather than an automatic resolution. This is accepted as the honest trade for not needing a one-time re-tagging migration step; see "Home-scoped tab titles" above.

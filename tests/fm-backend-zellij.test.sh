@@ -47,10 +47,18 @@ if [ "${1:-}" = --version ]; then
   exit 0
 fi
 if [ "${1:-}" = list-sessions ]; then
-  printf '%s\n' "${FM_ZELLIJ_SESSION_LIST:-}"
+  # After an `attach` has run, switch to the post-attach listing when one is
+  # provided (lets server_ensure's recreate path observe a dead session become
+  # live). list-sessions is never call-counted.
+  if [ -f "$RESP/.attached" ] && [ -n "${FM_ZELLIJ_SESSION_LIST_AFTER_ATTACH:-}" ]; then
+    printf '%s\n' "$FM_ZELLIJ_SESSION_LIST_AFTER_ATTACH"
+  else
+    printf '%s\n' "${FM_ZELLIJ_SESSION_LIST:-}"
+  fi
   exit 0
 fi
 if [ "${1:-}" = attach ]; then
+  touch "$RESP/.attached"
   exit "${FM_ZELLIJ_ATTACH_EXIT:-0}"
 fi
 
@@ -70,6 +78,13 @@ SH
 zellij_pane_response() {
   local dir=$1 n=$2 pane=${3:-7} tab=${4:-3}
   printf '[{"id":%s,"tab_id":%s,"is_plugin":false}]\n' "$pane" "$tab" > "$dir/responses/$n.out"
+}
+
+# zellij_pane_cwd_response: a list-panes --json response that also carries
+# pane_cwd, for fm_backend_zellij_pane_cwd / ensure_pane_cwd tests.
+zellij_pane_cwd_response() {  # <dir> <n> <cwd> [pane] [tab]
+  local dir=$1 n=$2 cwd=$3 pane=${4:-7} tab=${5:-3}
+  printf '[{"id":%s,"tab_id":%s,"is_plugin":false,"pane_cwd":"%s"}]\n' "$pane" "$tab" "$cwd" > "$dir/responses/$n.out"
 }
 
 zellij_tab_response() {
@@ -429,6 +444,69 @@ test_server_ensure_skips_attach_when_already_exists() {
   pass "fm_backend_zellij_server_ensure: reuses an existing session without calling attach"
 }
 
+# --- dead-session detection: an EXITED zellij session is treated as dead ------
+# Verified real zellij 0.44.1 (docs/zellij-backend.md "Dead-session
+# detection"): a stopped-but-resurrectable session is listed as
+# "<name> [Created ...] (EXITED - attach to resurrect)", but the OLD
+# `list-sessions --short` collapses it to a bare name indistinguishable from a
+# live one - so it was wrongly counted alive and server_ensure never rebuilt
+# it. session_exists now parses the full --no-formatting listing and drops any
+# EXITED line, and server_ensure rebuilds a dead session by RESURRECTING it
+# (attach -b) without destroying the operator's serialized husk.
+
+test_session_exists_false_for_exited_session() {
+  local dir fb status
+  dir="$TMP_ROOT/exists-exited"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'firstmate [Created 1h 2m 3s ago] (EXITED - attach to resurrect)' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_session_exists firstmate' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "session_exists must treat an EXITED session as dead so server_ensure rebuilds it"
+  pass "fm_backend_zellij_session_exists: false for an EXITED (dead-but-resurrectable) session"
+}
+
+test_session_exists_true_for_live_session_full_format() {
+  local dir fb
+  dir="$TMP_ROOT/exists-live-full"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'blossoming-ukulele [Created 2h ago] (current)\nfirstmate [Created 1h ago] ' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_session_exists firstmate' "$ROOT"
+  expect_code 0 $? "session_exists should report true for a live session in the full list-sessions format"
+  pass "fm_backend_zellij_session_exists: true for a live session line (real --no-formatting format)"
+}
+
+test_live_sessions_filters_exited_keeps_live() {
+  local dir fb out
+  dir="$TMP_ROOT/live-sessions-filter"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'alive-one [Created 5m ago] \ndead-one [Created 9m ago] (EXITED - attach to resurrect)\nalive-two [Created 1m ago] (current)' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_live_sessions' "$ROOT" )
+  [ "$out" = $'alive-one\nalive-two' ] \
+    || fail "live_sessions should list only live session names (bare), dropping EXITED ones, got '$out'"
+  pass "fm_backend_zellij_live_sessions: emits only live bare names, dropping EXITED sessions"
+}
+
+test_server_ensure_resurrects_dead_session_without_deleting() {
+  local dir fb
+  dir="$TMP_ROOT/server-resurrect-exited"; mkdir -p "$dir/responses"
+  fb=$(make_zellij_fakebin "$dir")
+  # Session starts as an EXITED husk (dead); once `attach` runs the fake flips
+  # to the live listing, so server_ensure's post-attach liveness loop succeeds.
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=$'firstmate [Created 1h ago] (EXITED - attach to resurrect)' \
+    FM_ZELLIJ_SESSION_LIST_AFTER_ATTACH=$'firstmate [Created 1s ago] ' \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_server_ensure firstmate' "$ROOT"
+  expect_code 0 $? "server_ensure should rebuild a dead (EXITED) session by resurrecting it and report success once it is live"
+  assert_contains "$(cat "$dir/log")" $'\x1f''attach'$'\x1f''-b'$'\x1f''firstmate' \
+    "server_ensure did not resurrect the dead session with attach -b"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''delete-session' \
+    "server_ensure must NOT delete the husk - that would irreversibly discard an operator's serialized state on the shared session name"
+  pass "fm_backend_zellij_server_ensure: rebuilds a dead (EXITED) session by resurrecting it WITHOUT destroying the husk"
+}
+
 # --- dispatch wiring (fm-backend.sh) ------------------------------------------
 
 test_dispatch_routes_zellij_backend() {
@@ -473,11 +551,16 @@ test_create_task_creates_and_parses_ids() {
   printf '3\n' > "$dir/responses/2.out"
   # 3: list-panes --json -> the new tab's terminal pane
   printf '[{"id":7,"tab_id":3,"is_plugin":false}]\n' > "$dir/responses/3.out"
+  # 4: ensure_pane_cwd reads pane_cwd -> already the requested cwd (fresh
+  # session honored --cwd), so no cd is sent.
+  zellij_pane_cwd_response "$dir" 4 /tmp/proj 7 3
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-newtask /tmp/proj' "$ROOT" )
   [ "$out" = "3 7" ] || fail "create_task should echo '<tab_id> <pane_id>', got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''paste' \
+    "create_task should send no cd when the fresh pane already reports the requested cwd"
   assert_contains "$(cat "$dir/log")" $'\x1f''new-tab'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--name'$'\x1f'"$title" \
     "create_task did not call new-tab with the right cwd/home-scoped name"
   pass "fm_backend_zellij_create_task: creates a home-scoped tab and parses tab_id/pane_id from the response"
@@ -492,7 +575,9 @@ test_create_task_restores_previously_active_tab() {
   printf '4\n' > "$dir/responses/2.out"
   # 3: list-panes --json -> tab 4's terminal pane
   printf '[{"id":9,"tab_id":4,"is_plugin":false}]\n' > "$dir/responses/3.out"
-  # 4: go-to-tab-by-id 0 (the restore call) - silent on success
+  # 4: ensure_pane_cwd reads pane_cwd -> already the requested cwd, no cd sent
+  zellij_pane_cwd_response "$dir" 4 /tmp/proj 9 4
+  # 5: go-to-tab-by-id 0 (the restore call) - silent on success
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -510,6 +595,8 @@ test_create_task_no_restore_when_new_tab_was_already_active() {
   printf '[]\n' > "$dir/responses/1.out"
   printf '5\n' > "$dir/responses/2.out"
   printf '[{"id":11,"tab_id":5,"is_plugin":false}]\n' > "$dir/responses/3.out"
+  # 4: ensure_pane_cwd reads pane_cwd -> already the requested cwd, no cd sent
+  zellij_pane_cwd_response "$dir" 4 /tmp/proj 11 5
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -518,6 +605,104 @@ test_create_task_no_restore_when_new_tab_was_already_active() {
   assert_not_contains "$(cat "$dir/log")" $'\x1f''go-to-tab-by-id' \
     "create_task should not call go-to-tab-by-id when there was no previously-active tab (no attached client)"
   pass "fm_backend_zellij_create_task: skips the restore call when there was no previously-active tab"
+}
+
+# --- ensure_pane_cwd: guarantee the worktree cwd (resurrected session ignores --cwd)
+
+test_ensure_pane_cwd_noop_when_already_correct() {
+  local dir fb
+  dir="$TMP_ROOT/cwd-noop"; mkdir -p "$dir/responses"
+  # 1: pane_cwd already reports the requested dir (fresh session honored --cwd)
+  zellij_pane_cwd_response "$dir" 1 /tmp/proj 7 3
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_ensure_pane_cwd firstmate 7 /tmp/proj' "$ROOT"
+  expect_code 0 $? "ensure_pane_cwd should succeed immediately when the pane already reports the requested cwd"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''paste' \
+    "ensure_pane_cwd must send no cd when the pane already reports the requested cwd"
+  pass "fm_backend_zellij_ensure_pane_cwd: no-op (no cd) when the pane already reports the requested cwd"
+}
+
+test_ensure_pane_cwd_establishes_when_new_tab_cwd_ignored() {
+  local dir fb
+  dir="$TMP_ROOT/cwd-establish"; mkdir -p "$dir/responses"
+  # 1: pane_cwd reports a DIFFERENT dir (resurrected session ignored --cwd)
+  zellij_pane_cwd_response "$dir" 1 /some/other/dir 7 3
+  # 2,3,4: Ctrl-u, paste, Enter (empty success)
+  # 5: pane_cwd now reports the requested dir (cd landed)
+  zellij_pane_cwd_response "$dir" 5 /tmp/proj 7 3
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_ensure_pane_cwd firstmate 7 /tmp/proj' "$ROOT"
+  expect_code 0 $? "ensure_pane_cwd should establish the cwd with a cd when new-tab --cwd was ignored"
+  assert_contains "$(cat "$dir/log")" $'\x1f''paste'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''--'$'\x1f'"cd -- '/tmp/proj'" \
+    "ensure_pane_cwd did not send the expected cd to establish the requested cwd"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''Ctrl u' \
+    "ensure_pane_cwd did not clear the input line before the cd (retry-concatenation guard)"
+  pass "fm_backend_zellij_ensure_pane_cwd: establishes the cwd with a line-cleared cd when new-tab --cwd was ignored"
+}
+
+test_ensure_pane_cwd_fails_loudly_when_uncertain() {
+  local dir fb status out
+  dir="$TMP_ROOT/cwd-fail"; mkdir -p "$dir/responses"
+  # Every pane_cwd read reports the WRONG dir - the cd never appears to land, so
+  # ensure_pane_cwd must fail rather than silently accept a wrong directory.
+  # pane_cwd is read at ordinals 1 (initial poll) then 5,9,13,17,21 (verify
+  # after each of the 5 establish attempts); the send-keys/paste calls in
+  # between return empty-success.
+  local n
+  for n in 1 5 9 13 17 21; do zellij_pane_cwd_response "$dir" "$n" /some/other/dir 7 3; done
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_ensure_pane_cwd firstmate 7 /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "ensure_pane_cwd must fail when it cannot confirm the requested cwd (never silently accept a wrong directory)"
+  assert_contains "$out" "could not establish cwd" "ensure_pane_cwd did not report the cwd it could not establish"
+  pass "fm_backend_zellij_ensure_pane_cwd: fails loudly when the requested cwd cannot be confirmed"
+}
+
+test_create_task_establishes_cwd_when_new_tab_cwd_ignored() {
+  local dir fb out
+  dir="$TMP_ROOT/create-task-cwd-establish"; mkdir -p "$dir/responses"
+  # 1: list-tabs [] ; 2: new-tab "3" ; 3: list-panes pane 7
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '3\n' > "$dir/responses/2.out"
+  printf '[{"id":7,"tab_id":3,"is_plugin":false}]\n' > "$dir/responses/3.out"
+  # 4: ensure_pane_cwd initial poll -> WRONG dir (resurrected session)
+  zellij_pane_cwd_response "$dir" 4 /some/other/dir 7 3
+  # 5,6,7: Ctrl-u, paste, Enter ; 8: verify -> requested dir (cd landed)
+  zellij_pane_cwd_response "$dir" 8 /tmp/proj 7 3
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-cwdtask /tmp/proj' "$ROOT" )
+  [ "$out" = "3 7" ] || fail "create_task should still echo '<tab_id> <pane_id>' after establishing the cwd, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''paste'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''--'$'\x1f'"cd -- '/tmp/proj'" \
+    "create_task did not establish the requested cwd when new-tab --cwd was ignored (resurrected session)"
+  pass "fm_backend_zellij_create_task: establishes the worktree cwd when the resurrected session ignored new-tab --cwd"
+}
+
+test_create_task_refuses_when_cwd_cannot_be_established() {
+  local dir fb status out n
+  dir="$TMP_ROOT/create-task-cwd-fail"; mkdir -p "$dir/responses"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '3\n' > "$dir/responses/2.out"
+  printf '[{"id":7,"tab_id":3,"is_plugin":false}]\n' > "$dir/responses/3.out"
+  # ensure_pane_cwd reads pane_cwd at 4 (initial) then 8,12,16,20,24 (verifies);
+  # all report the WRONG dir so the cwd can never be confirmed.
+  for n in 4 8 12 16 20 24; do zellij_pane_cwd_response "$dir" "$n" /some/other/dir 7 3; done
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-cwdfail /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse (not hand back a tab) when the worktree cwd cannot be established"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''3' \
+    "create_task did not close the tab it created after failing to establish the cwd (would leave a ghost)"
+  pass "fm_backend_zellij_create_task: refuses and cleans up its tab when the worktree cwd cannot be established"
 }
 
 # --- capture / send_key / send_literal / current_path / kill -----------------
@@ -649,6 +834,122 @@ test_expected_label_rejects_reused_pane_id() {
   assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
     "send_key should not run after expected-label readiness fails"
   pass "fm_backend_zellij_target_ready: expected labels reject stale pane ids reused by another tab"
+}
+
+# --- tab-name decoration: matching tolerates appended status glyphs ----------
+# Verified real finding (docs/zellij-backend.md "Tab-name decoration"): a
+# tab-bar/status plugin APPENDS dynamic glyphs to the rendered tab name, so the
+# old exact `.name == want` equality failed and fm-send/fm-crew-state/fm-teardown
+# stopped resolving live, healthy panes. Matching now tolerates a trailing
+# decoration run while still refusing a prefix collision (fm-task1 vs fm-task10).
+
+test_expected_label_tolerates_decorated_scoped_title() {
+  local dir fb title
+  dir="$TMP_ROOT/label-decorated-scoped"; mkdir -p "$dir/responses"
+  title=$(zellij_expected_scoped_title fm-declabel)
+  zellij_pane_response "$dir" 1 7 3
+  # The owning tab carries its home-scoped title with a plugin glyph appended
+  # after a space - exact equality would miss it.
+  zellij_tab_response "$dir" 2 3 "$title ●"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_key firstmate:7 Escape fm-declabel' "$ROOT"
+  expect_code 0 $? "send_key should still reach a task tab whose home-scoped title carries appended plugin decoration"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''Esc' \
+    "send_key did not send after accepting the decorated scoped tab title"
+  pass "fm_backend_zellij_tab_matches_label: matches a home-scoped title with appended tab-bar decoration"
+}
+
+test_expected_label_tolerates_decorated_legacy_title() {
+  local dir fb
+  dir="$TMP_ROOT/label-decorated-legacy"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  # A single pre-migration untagged tab whose bare title has a glyph appended
+  # directly (no separating space) - still the only tab carrying it.
+  zellij_tab_response "$dir" 2 3 "fm-legacydec◆"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_key firstmate:7 Escape fm-legacydec' "$ROOT"
+  expect_code 0 $? "send_key should reach an unambiguous legacy tab whose bare title carries appended decoration"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys'$'\x1f''--pane-id'$'\x1f''7'$'\x1f''Esc' \
+    "send_key did not send after accepting the decorated legacy tab title"
+  pass "fm_backend_zellij_tab_matches_label: matches an unambiguous legacy bare title with appended decoration"
+}
+
+test_expected_label_rejects_decorated_prefix_collision() {
+  local dir fb status
+  dir="$TMP_ROOT/label-decorated-collision"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  # The pane's owning tab is "fm-task10" (decorated); the expected label is the
+  # DIFFERENT task "fm-task1". Decoration tolerance must NOT let the fm-task1
+  # prefix swallow fm-task10 - the next char after the prefix is a digit, not a
+  # decoration boundary.
+  zellij_tab_response "$dir" 2 3 "fm-task10 ●"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_key firstmate:7 Escape fm-task1' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "send_key must reject fm-task1 against a decorated fm-task10 tab (prefix collision)"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_key should not send after a decorated prefix-collision match is correctly refused"
+  pass "fm_backend_zellij_tab_matches_label: decoration tolerance still refuses a fm-task1 vs fm-task10 prefix collision"
+}
+
+test_expected_label_refuses_ambiguous_decorated_legacy() {
+  local dir fb status
+  dir="$TMP_ROOT/label-decorated-ambiguous"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  # Two live tabs share the same bare legacy title, each decorated differently:
+  # the ambiguity guard must still refuse rather than trust our pane's tab.
+  zellij_multi_tab_response "$dir" 2 3 "fm-ambidec ●" 9 "fm-ambidec *"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_key firstmate:7 Escape fm-ambidec' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "send_key should refuse an ambiguous decorated legacy title shared by 2+ live tabs"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "send_key should not send after an ambiguous decorated legacy-title match refuses"
+  pass "fm_backend_zellij_tab_matches_label: decoration tolerance preserves the 2+ live-tab ambiguity guard"
+}
+
+test_list_live_strips_appended_decoration_from_label() {
+  local dir fb out own_title
+  dir="$TMP_ROOT/list-live-decorated"; mkdir -p "$dir/responses"
+  own_title=$(zellij_expected_scoped_title fm-declist)
+  # Our own home-scoped tab, rendered with an appended plugin glyph.
+  zellij_multi_tab_response "$dir" 1 3 "$own_title ●"
+  zellij_pane_response "$dir" 2 7 3
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_list_live firstmate' "$ROOT" )
+  [ "$out" = $'firstmate:7\tfm-declist' ] \
+    || fail "list_live should strip appended decoration back to the plain fm-<id> label, got '$out'"
+  pass "fm_backend_zellij_list_live: strips appended tab-bar decoration from the emitted plain label"
+}
+
+test_list_live_strips_non_ascii_decoration_agreeing_with_predicate() {
+  local dir fb out own_title
+  dir="$TMP_ROOT/list-live-nonascii"; mkdir -p "$dir/responses"
+  own_title=$(zellij_expected_scoped_title fm-nastask)
+  # Decoration appended directly with NO separating space, using a non-ASCII
+  # alphanumeric glyph. The locale-dependent [:alnum:] would (in a UTF-8 locale)
+  # KEEP it and emit a corrupted label, disagreeing with the jq predicate; the
+  # fixed ASCII [!A-Za-z0-9_-] strips it. Run under a UTF-8 locale so the old
+  # bug would have been live here.
+  zellij_multi_tab_response "$dir" 1 3 "${own_title}あ"
+  zellij_pane_response "$dir" 2 7 3
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" LC_ALL=C.UTF-8 FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_list_live firstmate' "$ROOT" )
+  [ "$out" = $'firstmate:7\tfm-nastask' ] \
+    || fail "list_live should strip a NON-ASCII decoration glyph (ASCII charset, not locale-dependent [:alnum:]), got '$out'"
+  pass "fm_backend_zellij_list_live: strips non-ASCII decoration with the same ASCII charset the jq predicate anchors on"
 }
 
 test_current_path_probes_with_marker_and_ignores_prompt_paths() {
@@ -1034,12 +1335,21 @@ test_resolve_bare_selector_refuses_cross_session_ambiguous_untagged
 test_session_exists_true_when_listed
 test_session_exists_false_when_absent
 test_server_ensure_skips_attach_when_already_exists
+test_session_exists_false_for_exited_session
+test_session_exists_true_for_live_session_full_format
+test_live_sessions_filters_exited_keeps_live
+test_server_ensure_resurrects_dead_session_without_deleting
 test_dispatch_routes_zellij_backend
 test_dispatch_busy_state_unknown_for_zellij
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
+test_ensure_pane_cwd_noop_when_already_correct
+test_ensure_pane_cwd_establishes_when_new_tab_cwd_ignored
+test_ensure_pane_cwd_fails_loudly_when_uncertain
+test_create_task_establishes_cwd_when_new_tab_cwd_ignored
+test_create_task_refuses_when_cwd_cannot_be_established
 test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent
@@ -1048,6 +1358,12 @@ test_send_key_normalizes_and_targets_pane
 test_send_literal_uses_paste_separator_for_option_shaped_text
 test_expected_label_allows_matching_task_tab
 test_expected_label_rejects_reused_pane_id
+test_expected_label_tolerates_decorated_scoped_title
+test_expected_label_tolerates_decorated_legacy_title
+test_expected_label_rejects_decorated_prefix_collision
+test_expected_label_refuses_ambiguous_decorated_legacy
+test_list_live_strips_appended_decoration_from_label
+test_list_live_strips_non_ascii_decoration_agreeing_with_predicate
 test_current_path_probes_with_marker_and_ignores_prompt_paths
 test_current_path_ignores_tilde_prefixed_banner_lines
 test_kill_resolves_tab_and_closes_by_id

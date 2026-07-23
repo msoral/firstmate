@@ -201,5 +201,75 @@ pass "real zellij: list_live discovers a live task tab by fm-<id> name"
 
 fm_backend_zellij_kill "$SESSION:$PANE_ID2"
 
+# --- dead-session detection: an EXITED session is rebuilt, worktree cwd honored
+# Bug (docs/zellij-backend.md "Dead-session detection"): session_exists counted
+# an EXITED session as alive, so server_ensure never rebuilt it and every op
+# failed "Session not found"; and a resurrected session silently ignores a new
+# tab's --cwd. Kill the isolated session to leave an EXITED husk, prove the husk
+# actually reached the EXITED state (so this assertion is not vacuous on a
+# machine with session serialization disabled - there kill removes the session
+# entirely and we skip the resurrect assertions rather than pass emptily), then
+# container_ensure must rebuild it and create_task must land the pane in the
+# requested cwd. Guarded by the same fleet-safety check as cleanup so the kill
+# can only ever target this test's own isolated session, never "firstmate".
+zellij_refuse_if_unsafe "$SESSION" || fail "safety guard refused the isolated smoke session before the dead-session repro"
+zellij kill-session "$SESSION" >/dev/null 2>&1
+
+# Bounded wait for the kill to take effect: either the session becomes EXITED
+# (husk survives - the resurrect path we want to exercise) or it disappears
+# entirely (serialization disabled on this host).
+EXITED_SEEN=""; GONE_SEEN=""
+for _i in $(seq 1 20); do
+  listing=$(zellij list-sessions --no-formatting 2>/dev/null)
+  if printf '%s\n' "$listing" | awk -v s="$SESSION" '$1 == s && index($0,"(EXITED")>0 {found=1} END{exit !found}'; then
+    EXITED_SEEN=1; break
+  fi
+  if ! printf '%s\n' "$listing" | awk -v s="$SESSION" '$1 == s {found=1} END{exit !found}'; then
+    GONE_SEEN=1; break
+  fi
+  sleep 0.3
+done
+
+if fm_backend_zellij_session_exists "$SESSION"; then
+  fail "session_exists must report a killed (EXITED-or-gone) session as dead, not alive"
+fi
+pass "real zellij: session_exists reports a killed session as dead"
+
+if [ -z "$EXITED_SEEN" ] && [ -z "$GONE_SEEN" ]; then
+  fail "real zellij: killed session neither became EXITED nor disappeared within the timeout"
+fi
+if [ -n "$EXITED_SEEN" ]; then
+  pass "real zellij: the killed session actually reached the EXITED (resurrectable) state (non-vacuous)"
+else
+  pass "real zellij: this host has session serialization disabled (killed session vanished); resurrect path not exercised here"
+fi
+
+REBUILT=$(fm_backend_zellij_container_ensure) || fail "container_ensure failed to rebuild a dead session"
+[ "$REBUILT" = "$SESSION" ] || fail "container_ensure should rebuild under the same session name, got '$REBUILT'"
+fm_backend_zellij_session_exists "$SESSION" || fail "the rebuilt session should be live"
+pass "real zellij: container_ensure rebuilds a dead session instead of leaving it unreachable"
+
+FRESH_CWD="$TMP_CWD/fm-zellij-freshcwd-$$"
+mkdir -p "$FRESH_CWD" || fail "could not create fresh-cwd fixture: $FRESH_CWD"
+FRESH_CWD=$(cd "$FRESH_CWD" && pwd -P) || fail "could not resolve fresh-cwd fixture"
+IDS3=$(fm_backend_zellij_create_task "$SESSION" fm-freshcwd "$FRESH_CWD") || fail "create_task in the rebuilt session failed"
+read -r _TAB_ID3 PANE_ID3 <<EOF
+$IDS3
+EOF
+# create_task guarantees the cwd itself (fm_backend_zellij_ensure_pane_cwd), so
+# the pane must report the requested dir regardless of whether the resurrected
+# session honored new-tab --cwd. Bounded poll rather than a fixed sleep.
+NEW_CWD=""
+for _i in $(seq 1 20); do
+  NEW_CWD=$(fm_backend_zellij_cli "$SESSION" action list-panes --json 2>/dev/null \
+    | jq -r --argjson p "$PANE_ID3" '.[]? | select(.id == $p and .is_plugin == false) | .pane_cwd' 2>/dev/null | head -1)
+  [ "$NEW_CWD" = "$FRESH_CWD" ] && break
+  sleep 0.3
+done
+[ "$NEW_CWD" = "$FRESH_CWD" ] \
+  || fail "real zellij: the pane did not land in the requested cwd after rebuild, got '$NEW_CWD' want '$FRESH_CWD'"
+pass "real zellij: create_task lands the pane in the requested cwd in the rebuilt session (guaranteed regardless of --cwd)"
+fm_backend_zellij_kill "$SESSION:$PANE_ID3"
+
 cleanup_all
 trap - EXIT
