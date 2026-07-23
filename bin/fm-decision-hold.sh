@@ -115,17 +115,47 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+# tasks-axi renders a show field that needs quoting as a JSON string ("a,b,c",
+# "Choose route north, or route south") and leaves a plain value bare. Return the
+# field's own value with the surrounding quotes removed and the \" and \\ escapes
+# decoded in one left-to-right pass, so a rendered value can be compared against
+# the value it was created from. A value that carries a control-character escape
+# does not round-trip and stays unequal, which keeps the comparison conservative.
+# This is the single owner of that decoding; show_field itself must stay raw
+# because verify_resolution_identity matches body against its leading quote.
+unquote_field() {  # <rendered-value>
+  local value=$1 out='' chunk
+  case "$value" in
+    '"'*'"') : ;;
+    *) printf '%s\n' "$value"; return 0 ;;
+  esac
+  value=${value#\"}
+  value=${value%\"}
+  while :; do
+    chunk=${value%%\\*}
+    out="$out$chunk"
+    [ "$chunk" != "$value" ] || break
+    value=${value#"$chunk"\\}
+    out="$out${value%"${value#?}"}"
+    value=${value#?}
+  done
+  printf '%s\n' "$out"
+}
+
 # tasks-axi renders a multi-entry blocked_by as a quoted CSV ("a,b,c") and a lone
-# entry unquoted (a). Return the ids with the surrounding quotes and whitespace
-# stripped so a ",id," comma-boundary membership test matches an id in any list
-# position, including first and last where the abutting quote would otherwise
-# break the match. Kept as the single owner so the two resolve loops cannot drift.
+# entry unquoted (a). Answer whether the list contains the id, with the quotes and
+# whitespace stripped first so the ",id," comma-boundary test matches an id in any
+# list position, including first and last where the abutting quote would otherwise
+# break the match. Kept as the single owner of the whole check, parse and match
+# together, so the two resolve loops cannot drift from it.
 blocked_by_ids() {  # <show-output>
   local blocked
   blocked=$(show_field "$1" blocked_by | tr -d '[:space:]')
-  blocked=${blocked#\"}
-  blocked=${blocked%\"}
-  printf '%s\n' "$blocked"
+  unquote_field "$blocked"
+}
+
+blocked_by_has() {  # <show-output> <id>
+  list_has_key "$(blocked_by_ids "$1")" "$2"
 }
 
 origin_exists_here() {  # <origin-id>
@@ -265,7 +295,7 @@ command_hold() {
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
-    existing_title=$(show_field "$show" title)
+    existing_title=$(unquote_field "$(show_field "$show" title)")
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
@@ -381,7 +411,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -428,16 +458,12 @@ command_resolve() {
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
-    blocked=$(blocked_by_ids "$show")
-    case ",$blocked," in
-      *",$id,"*) : ;;
-      *)
-        case "$hold_body" in
-          *"Resolution recorded by fm-decision-hold."*"- $dep"*) : ;;
-          *) fail "routed task $dep is not durably blocked by $id" ;;
-        esac
-        ;;
-    esac
+    if ! blocked_by_has "$show" "$id"; then
+      case "$hold_body" in
+        *"Resolution recorded by fm-decision-hold."*"- $dep"*) : ;;
+        *) fail "routed task $dep is not durably blocked by $id" ;;
+      esac
+    fi
   done
 
   body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
@@ -448,13 +474,10 @@ command_resolve() {
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
-    blocked=$(blocked_by_ids "$show")
-    case ",$blocked," in
-      *",$id,"*)
-        tasks_axi unblock "$dep" --by "$id" >/dev/null \
-          || fail "could not route the recorded decision to $dep"
-        ;;
-    esac
+    if blocked_by_has "$show" "$id"; then
+      tasks_axi unblock "$dep" --by "$id" >/dev/null \
+        || fail "could not route the recorded decision to $dep"
+    fi
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
@@ -462,7 +485,10 @@ command_resolve() {
 }
 
 # Guard the dispatch so tests can source this file to unit-test pure helpers
-# without executing a subcommand; a direct run is unchanged.
+# without executing a subcommand; a direct run is unchanged. A caller that loads
+# this file while carrying a subcommand meant it to run, and callers such as scout
+# teardown read a zero exit as proof that the subcommand passed, so that case
+# refuses loudly instead of silently succeeding without running a single check.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-}" in
     id) shift; command_id "$@" ;;
@@ -473,4 +499,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     -h|--help) usage ;;
     *) usage >&2; exit 2 ;;
   esac
+elif [ "$#" -gt 0 ]; then
+  fail "this file was loaded rather than executed, so '$*' did not run; execute ${BASH_SOURCE[0]} instead"
 fi

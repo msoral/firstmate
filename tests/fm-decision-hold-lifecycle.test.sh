@@ -550,30 +550,109 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
-# Directly pins the single-owner blocked_by parser used by resolve. tasks-axi
+# Directly pins the single-owner blocked_by predicate used by resolve. tasks-axi
 # quotes a multi-entry blocked_by ("a,b,c") and leaves a lone entry bare (a). The
 # regression is the LAST position: before the surrounding quotes were stripped the
 # trailing quote abutted the id ("...,the-hold") and broke the ",id," comma-boundary
 # membership test, so resolve refused to route and the hold had to be closed by hand.
-blocked_by_ids_of() {  # <blocked_by-render>
+# The helper clears the positional arguments before loading so the loaded file is
+# not carrying a subcommand, which the dispatch guard refuses.
+blocked_by_has_of() {  # <blocked_by-render> <id>
   FM_ROOT_OVERRIDE="$ROOT" bash -c '
-    . "$1"
-    show=$(printf "  blocked_by: %s\n" "$2")
-    blocked_by_ids "$show"
-  ' _ "$ROOT/bin/fm-decision-hold.sh" "$1"
+    script=$1
+    render=$2
+    id=$3
+    set --
+    . "$script"
+    blocked_by_has "$(printf "  blocked_by: %s\n" "$render")" "$id"
+  ' _ "$ROOT/bin/fm-decision-hold.sh" "$1" "$2"
 }
 
-test_blocked_by_ids_strips_quotes_at_every_position() {
-  local last first single
-  last=$(blocked_by_ids_of '"pad-a,pad-b,the-hold"')
-  [ "$last" = "pad-a,pad-b,the-hold" ] || fail "last-position quotes not stripped: [$last]"
-  case ",$last," in *",the-hold,"*) : ;; *) fail "last-position id did not match by comma boundary: [$last]" ;; esac
-  first=$(blocked_by_ids_of '"the-hold,pad-a,pad-b"')
-  [ "$first" = "the-hold,pad-a,pad-b" ] || fail "first-position quotes not stripped: [$first]"
-  case ",$first," in *",the-hold,"*) : ;; *) fail "first-position id did not match by comma boundary: [$first]" ;; esac
-  single=$(blocked_by_ids_of 'the-hold')
-  [ "$single" = "the-hold" ] || fail "single unquoted entry was mangled: [$single]"
-  pass "blocked_by_ids strips surrounding quotes so an id matches in first, last, and single positions"
+test_blocked_by_predicate_matches_at_every_position() {
+  blocked_by_has_of '"pad-a,pad-b,the-hold"' the-hold \
+    || fail "last-position id did not match inside a quoted blocked_by"
+  blocked_by_has_of '"the-hold,pad-a,pad-b"' the-hold \
+    || fail "first-position id did not match inside a quoted blocked_by"
+  blocked_by_has_of '"pad-a,the-hold,pad-b"' the-hold \
+    || fail "middle-position id did not match inside a quoted blocked_by"
+  blocked_by_has_of 'the-hold' the-hold \
+    || fail "single unquoted entry did not match"
+  if blocked_by_has_of '"pad-a,pad-b"' the-hold; then
+    fail "an absent id matched a quoted blocked_by"
+  fi
+  if blocked_by_has_of '"pad-a,the-hold-suffix,pad-b"' the-hold; then
+    fail "a longer id sharing the prefix matched by substring"
+  fi
+  if blocked_by_has_of none the-hold; then
+    fail "an unblocked task matched by id"
+  fi
+  pass "blocked_by predicate matches an id in first, middle, last, and lone positions only"
+}
+
+# The dispatch guard exists so tests can load the pure helpers. Loading the file
+# while carrying a subcommand must refuse, because scout teardown reads a zero
+# exit from `verify` as proof the inventory gate passed before it erases a source.
+test_loaded_dispatch_refuses_a_subcommand() {
+  local out rc
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" bash -c '. "$1"; echo REACHED' _ \
+    "$ROOT/bin/fm-decision-hold.sh" verify sample-origin 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "loading the file with a subcommand succeeded without running it: $out"
+  case "$out" in
+    *REACHED*) fail "loading the file with a subcommand continued past the refusal: $out" ;;
+  esac
+  case "$out" in
+    *"loaded rather than executed"*) : ;;
+    *) fail "the refusal did not name the cause: $out" ;;
+  esac
+  pass "loading the script with a subcommand refuses instead of silently passing its gate"
+}
+
+# tasks-axi renders a title that needs quoting as a JSON string
+# (title: "Choose route north, or route south"). Comparing that rendered value
+# against the raw --title argument made an idempotent re-registration of an
+# unchanged hold fail with "has a different title", which is the same manual
+# reconciliation the blocked_by fix removed.
+test_hold_retry_accepts_its_own_rendered_title() {
+  local home id title quoted show
+  home=$(make_home quoted-title)
+  id=sample-title-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample titles" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create investigation backlog fixture"
+  write_origin_meta "$home" "$id"
+
+  title='Choose route north, or route south'
+  run_decisions "$home" hold "$id" route --title "$title" \
+    --reason "captain route choice pending" --repo sample >/dev/null \
+    || fail "could not register a hold whose title contains a comma"
+  show=$(tasks_in "$home" show "$id-decision-route" --full)
+  assert_contains "$show" "title: \"$title\"" "fixture must render a comma-bearing title quoted"
+  run_decisions "$home" hold "$id" route --title "$title" \
+    --reason "captain route choice pending" --repo sample >/dev/null \
+    || fail "idempotent retry rejected its own comma-bearing title"
+
+  quoted='Choose the "fast" route, or the slow one'
+  run_decisions "$home" hold "$id" quoted --title "$quoted" \
+    --reason "captain speed choice pending" --repo sample >/dev/null \
+    || fail "could not register a hold whose title contains quotes"
+  show=$(tasks_in "$home" show "$id-decision-quoted" --full)
+  assert_contains "$show" 'title: "Choose the \"fast\" route, or the slow one"' \
+    "fixture must render an embedded quote escaped"
+  run_decisions "$home" hold "$id" quoted --title "$quoted" \
+    --reason "captain speed choice pending" --repo sample >/dev/null \
+    || fail "idempotent retry rejected its own escaped title"
+
+  if run_decisions "$home" hold "$id" route --title 'Choose route north, only' \
+    --reason "captain route choice pending" --repo sample \
+    > "$home/retitled.out" 2> "$home/retitled.err"; then
+    fail "a genuinely different title reused an existing captain hold identity"
+  fi
+  assert_grep "has a different title" "$home/retitled.err" \
+    "a changed title must still be refused"
+  pass "an unchanged hold retry accepts its own rendered title and a changed title is refused"
 }
 
 test_uninventoried_report_decision_refuses_completion
@@ -586,4 +665,6 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
-test_blocked_by_ids_strips_quotes_at_every_position
+test_blocked_by_predicate_matches_at_every_position
+test_loaded_dispatch_refuses_a_subcommand
+test_hold_retry_accepts_its_own_rendered_title

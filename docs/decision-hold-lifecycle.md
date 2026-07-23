@@ -13,6 +13,13 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
+tasks-axi renders a `show --full` field that needs quoting as a JSON string, so a title containing a comma or a quote comes back as `"Choose route north, or route south"` while a plain title comes back bare, and a multi-entry `blocked_by` comes back as a quoted CSV while a lone entry comes back bare.
+`unquote_field` is the single owner of decoding that rendering back to the value it was created from, and both the title comparison and the `blocked_by` membership predicate use it, so an unchanged retry is accepted and an id matches in any list position.
+`show_field` itself stays raw because `verify_resolution_identity` matches the hold body against its leading quote.
+
+The subcommand dispatch runs only when this script is executed.
+Loading it while carrying a subcommand refuses with a non-zero exit rather than returning success without running the subcommand, because scout teardown reads a zero exit from `verify` as proof the inventory gate passed before it removes a source.
+
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
 It accepts `--none` as an explicit semantic inventory result, not as inferred absence.
@@ -43,11 +50,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Additional rendered-title and loaded-dispatch regression verification date: 2026-07-24.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The latest regressions cover a hold whose rendered title is quoted and escaped, so an unchanged retry stays idempotent while a genuinely changed title is still refused, and a load of the script that carries a subcommand, so the teardown gate cannot pass without running.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -62,6 +71,9 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - blocked_by predicate matches an id in first, middle, last, and lone positions only
+ok - loading the script with a subcommand refuses instead of silently passing its gate
+ok - an unchanged hold retry accepts its own rendered title and a changed title is refused
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly
@@ -78,14 +90,13 @@ $ bash tests/fm-brief.test.sh
 ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
 
 $ bash tests/fm-teardown.test.sh
-all teardown safety cases passed
+(32 teardown cases passed)
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 
 $ git diff --check
 (no output)
-
-$ for test_script in tests/*.test.sh; do bash "$test_script"; done
-ALL 71 TEST SCRIPTS PASSED
 ```
+
+The broad regression walk belongs to `.github/workflows/ci.yml`, which owns the full `bin/fm-test-run.sh` lane set; the record above is the intent-targeted evidence for this mechanism.
