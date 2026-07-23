@@ -115,6 +115,19 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+# tasks-axi renders a multi-entry blocked_by as a quoted CSV ("a,b,c") and a lone
+# entry unquoted (a). Return the ids with the surrounding quotes and whitespace
+# stripped so a ",id," comma-boundary membership test matches an id in any list
+# position, including first and last where the abutting quote would otherwise
+# break the match. Kept as the single owner so the two resolve loops cannot drift.
+blocked_by_ids() {  # <show-output>
+  local blocked
+  blocked=$(show_field "$1" blocked_by | tr -d '[:space:]')
+  blocked=${blocked#\"}
+  blocked=${blocked%\"}
+  printf '%s\n' "$blocked"
+}
+
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
@@ -415,10 +428,7 @@ command_resolve() {
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
-    # tasks-axi quotes multi-entry blocked_by as "a,b,c"; strip so edge ids match.
-    blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
-    blocked=${blocked#\"}
-    blocked=${blocked%\"}
+    blocked=$(blocked_by_ids "$show")
     case ",$blocked," in
       *",$id,"*) : ;;
       *)
@@ -438,9 +448,7 @@ command_resolve() {
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
-    blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
-    blocked=${blocked#\"}
-    blocked=${blocked%\"}
+    blocked=$(blocked_by_ids "$show")
     case ",$blocked," in
       *",$id,"*)
         tasks_axi unblock "$dep" --by "$id" >/dev/null \
@@ -453,12 +461,16 @@ command_resolve() {
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 
-case "${1:-}" in
-  id) shift; command_id "$@" ;;
-  hold) shift; command_hold "$@" ;;
-  complete) shift; command_complete "$@" ;;
-  verify) shift; command_verify "$@" ;;
-  resolve) shift; command_resolve "$@" ;;
-  -h|--help) usage ;;
-  *) usage >&2; exit 2 ;;
-esac
+# Guard the dispatch so tests can source this file to unit-test pure helpers
+# without executing a subcommand; a direct run is unchanged.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  case "${1:-}" in
+    id) shift; command_id "$@" ;;
+    hold) shift; command_hold "$@" ;;
+    complete) shift; command_complete "$@" ;;
+    verify) shift; command_verify "$@" ;;
+    resolve) shift; command_resolve "$@" ;;
+    -h|--help) usage ;;
+    *) usage >&2; exit 2 ;;
+  esac
+fi

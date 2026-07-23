@@ -550,6 +550,32 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# Directly pins the single-owner blocked_by parser used by resolve. tasks-axi
+# quotes a multi-entry blocked_by ("a,b,c") and leaves a lone entry bare (a). The
+# regression is the LAST position: before the surrounding quotes were stripped the
+# trailing quote abutted the id ("...,the-hold") and broke the ",id," comma-boundary
+# membership test, so resolve refused to route and the hold had to be closed by hand.
+blocked_by_ids_of() {  # <blocked_by-render>
+  FM_ROOT_OVERRIDE="$ROOT" bash -c '
+    . "$1"
+    show=$(printf "  blocked_by: %s\n" "$2")
+    blocked_by_ids "$show"
+  ' _ "$ROOT/bin/fm-decision-hold.sh" "$1"
+}
+
+test_blocked_by_ids_strips_quotes_at_every_position() {
+  local last first single
+  last=$(blocked_by_ids_of '"pad-a,pad-b,the-hold"')
+  [ "$last" = "pad-a,pad-b,the-hold" ] || fail "last-position quotes not stripped: [$last]"
+  case ",$last," in *",the-hold,"*) : ;; *) fail "last-position id did not match by comma boundary: [$last]" ;; esac
+  first=$(blocked_by_ids_of '"the-hold,pad-a,pad-b"')
+  [ "$first" = "the-hold,pad-a,pad-b" ] || fail "first-position quotes not stripped: [$first]"
+  case ",$first," in *",the-hold,"*) : ;; *) fail "first-position id did not match by comma boundary: [$first]" ;; esac
+  single=$(blocked_by_ids_of 'the-hold')
+  [ "$single" = "the-hold" ] || fail "single unquoted entry was mangled: [$single]"
+  pass "blocked_by_ids strips surrounding quotes so an id matches in first, last, and single positions"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -560,3 +586,4 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_blocked_by_ids_strips_quotes_at_every_position
