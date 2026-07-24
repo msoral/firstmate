@@ -131,6 +131,14 @@
 #                                   not misread as pending input.
 #          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
 #                                   (default 0.5)
+#          FM_VERIFY_ONCE_TRIES / FM_VERIFY_ONCE_SLEEP  bounded startup
+#                                   verify-before-trust probe of the resolved
+#                                   supervisor pane (default 40 tries x 0.5s).
+#                                   A wrong target or an idle-but-unreadable
+#                                   composer raises the wedge alarm at entry
+#                                   instead of after max-defer; a busy-only
+#                                   window is inconclusive (no alarm).
+#                                   FM_VERIFY_ONCE_SKIP=1 disables the probe.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
@@ -198,6 +206,13 @@ WEDGE_ALARM_NOTIFIER_PID=
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
+# verify-before-trust: at away-mode entry the daemon probes the resolved
+# supervisor pane up to VERIFY_ONCE_TRIES times (VERIFY_ONCE_SLEEP apart, ~20s
+# window) to prove it is genuinely injectable BEFORE the captain relies on it
+# overnight, instead of only discovering a wrong target / unreadable composer
+# hours later via the max-defer wedge alarm (the 2026-07-21 ~10.8h blind window).
+VERIFY_ONCE_TRIES_DEFAULT=40
+VERIFY_ONCE_SLEEP_DEFAULT=0.5
 CRASH_THRESHOLD_DEFAULT=10
 CRASH_WINDOW_DEFAULT=60
 CRASH_BACKOFF_DEFAULT=60
@@ -906,6 +921,107 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   fi
 }
 
+# verify_once_alarm: raise the wedge alarm at STARTUP when verify_once_injectable
+# proves the resolved supervisor pane is not injectable, so a discovery/composer
+# failure is loud within seconds of entering away mode rather than only after the
+# first real escalation ages past max-defer. Writes the same durable
+# .subsuper-inject-wedged marker the return catch-up surfaces (one owner of the
+# "inject wedged" signal), flashes the tmux status line when applicable, and fires
+# the configured active alert. Seeds WEDGE_ALARM_LAST_EPOCH so a real escalation
+# arriving moments later does not double-alarm inside the same max-defer window.
+verify_once_alarm() {  # <state> <target> <backend> <detail>
+  local state=$1 target=$2 backend=$3 detail=$4 marker summary
+  marker="$state/.subsuper-inject-wedged"
+  summary="away-mode verify-once FAILED: supervisor pane '$target' ($backend) not injectable at startup ($detail); escalations may not reach the captain - see $marker"
+  {
+    printf 'fm away-mode verify-once FAILED at %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'Supervisor pane %s (%s) could not be confirmed injectable at away-mode entry: %s\n' "$target" "$backend" "$detail"
+    printf 'Escalations may not reach the captain until this is resolved.\n'
+  } 2>/dev/null > "$marker" || true
+  WEDGE_ALARM_LAST_EPOCH=$(_now)
+  if [ "$backend" = tmux ]; then
+    tmux display-message -t "$target" "fm: away-mode verify-once FAILED — see $marker" 2>/dev/null || true
+  fi
+  wedge_alarm_notify "$summary" "$marker"
+}
+
+# verify_once_injectable: prove, ONCE at startup, that the resolved supervisor
+# pane is actually injectable BEFORE the captain walks away. Runs the same
+# non-destructive gate inject_msg uses (target exists, not busy, composer
+# affirmatively empty) over a bounded retry window, WITHOUT sending any message.
+#
+# Verdict rules, chosen so the alarm fires only on a POSITIVE wedge signature and
+# never on a transient busy pane (firstmate finishing its away-mode ack):
+#   - composer reads `empty` OR `pending` -> PASS. Both are affirmative readings
+#     of a genuine bordered agent composer, which is exactly what the incident's
+#     wrong-pane + broken-composer-detection failure could never produce. `empty`
+#     is fully injectable now; `pending` is a real composer that merely holds
+#     text, so injection will land once it clears.
+#   - the pane is seen IDLE (not busy) but its composer reads `unknown`
+#     (unreadable pane / dead shell / wrong non-agent pane) -> FAIL. An idle
+#     firstmate pane MUST read as a structural composer; persistent idle-unknown
+#     is the incident's signature.
+#   - the target never resolves across the whole window -> FAIL (wrong target).
+#   - the pane is busy for the ENTIRE window and never read idle -> INCONCLUSIVE:
+#     warn but do NOT alarm. A persistently-busy pane has a recognized agent
+#     footer, so it is a valid pane; the normal max-defer net still covers a real
+#     later wedge. Refusing to alarm here avoids a false alarm on a slow ack.
+# Only runs while afk is active (the presence gate inject honours); off-afk there
+# is no captain to protect yet. Returns 0 on PASS/INCONCLUSIVE, 1 on FAIL.
+verify_once_injectable() {  # <state> <target> <backend>
+  local state=$1 target=$2 backend=$3
+  local tries=${FM_VERIFY_ONCE_TRIES:-$VERIFY_ONCE_TRIES_DEFAULT}
+  local sleep_s=${FM_VERIFY_ONCE_SLEEP:-$VERIFY_ONCE_SLEEP_DEFAULT}
+  local i composer saw_target=0 saw_idle_unknown=0
+  afk_active "$state" || { log "verify-once: skipped (afk inactive)"; return 0; }
+  if [ "${FM_VERIFY_ONCE_SKIP:-0}" = 1 ]; then
+    log "verify-once: skipped (FM_VERIFY_ONCE_SKIP=1)"
+    return 0
+  fi
+  # A misconfigured window (zero, negative, or non-numeric tries) must degrade to
+  # SKIP, never to a false alarm: a zero-iteration loop would leave saw_target=0
+  # and report "target never resolved" for a pane it never probed.
+  case $tries in
+    ''|*[!0-9]*) log "verify-once: skipped (FM_VERIFY_ONCE_TRIES='$tries' is not a positive integer)"; return 0 ;;
+  esac
+  [ "$tries" -ge 1 ] || { log "verify-once: skipped (FM_VERIFY_ONCE_TRIES=$tries < 1)"; return 0; }
+  for ((i = 1; i <= tries; i++)); do
+    if ! fm_backend_target_exists "$backend" "$target"; then
+      log "verify-once: supervisor target '$target' not found (try $i/$tries)"
+    else
+      saw_target=1
+      if pane_is_busy "$target" "$backend"; then
+        log "verify-once: supervisor pane busy, retrying (try $i/$tries)"
+      else
+        composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+        case "$composer" in
+          empty|pending)
+            log "verify-once: supervisor pane '$target' ($backend) confirmed injectable (composer=$composer)"
+            return 0
+            ;;
+          *)
+            saw_idle_unknown=1
+            log "verify-once: idle composer not readable as empty (state=${composer:-unknown}, try $i/$tries)"
+            ;;
+        esac
+      fi
+    fi
+    [ "$i" -lt "$tries" ] && sleep "$sleep_s"
+  done
+  if [ "$saw_target" -eq 0 ]; then
+    log "ERROR: verify-once FAILED: supervisor target '$target' ($backend) never resolved in ${tries} tries; escalations cannot reach the captain. Raising the wedge alarm now instead of waiting for max-defer."
+    verify_once_alarm "$state" "$target" "$backend" "target never resolved"
+    return 1
+  fi
+  if [ "$saw_idle_unknown" -eq 1 ]; then
+    log "ERROR: verify-once FAILED: supervisor pane '$target' ($backend) was idle but its composer never read as a genuine agent composer (wrong pane or unreadable). Raising the wedge alarm now instead of waiting for max-defer."
+    verify_once_alarm "$state" "$target" "$backend" "idle pane composer unreadable"
+    return 1
+  fi
+  log "warn: verify-once inconclusive: supervisor pane '$target' ($backend) stayed busy for the whole ${tries}-try window; not alarming (valid agent pane, just occupied). Max-defer wedge alarm remains the backstop."
+  return 0
+}
+
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
   local f=$1 since
   [ -s "$f" ] || { echo 999999; return; }
@@ -1379,9 +1495,14 @@ fm_super_main() {
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
-  migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
+  # Installed BEFORE the verify-before-trust probe below: that probe can block for
+  # up to FM_VERIFY_ONCE_TRIES * FM_VERIFY_ONCE_SLEEP (~20s), and the common way it
+  # ends early is the captain returning immediately, which runs fm-afk-launch.sh
+  # stop and SIGTERMs the daemon mid-probe. Trapping first keeps that window under
+  # the same flush/lock-release/pidfile cleanup as the rest of the daemon's life,
+  # instead of the default SIGTERM action leaving a stale lock and pidfile.
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
     trap - TERM INT
@@ -1400,6 +1521,16 @@ fm_super_main() {
     exit 0
   }
   trap cleanup TERM INT
+
+  # --- verify-before-trust: prove one delivery is possible at entry ----------
+  # Before the captain relies on this daemon overnight, confirm the resolved pane
+  # is actually injectable (or alarm loudly now). This is the guard that turns a
+  # wrong-target or unreadable-composer failure from a multi-hour blind wedge into
+  # a within-seconds alert. It never aborts startup: the daemon still runs so the
+  # durable buffer, wake-queue replay, and max-defer net all remain in force.
+  verify_once_injectable "$STATE" "$TARGET" "$BACKEND" || true
+
+  migrate_watcher_pause_markers "$STATE"
 
   # --- crash-loop guard -----------------------------------------------------
   local crash_times=() backoff_secs=$CRASH_NORMAL_SLEEP

@@ -76,3 +76,60 @@ discover_supervisor_backend() {
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
   return 1
 }
+
+# --- native-background cross-process handoff --------------------------------
+# On the claude/grok native-background afk path the launcher and the daemon run
+# in DIFFERENT processes with different environments:
+#   - bin/fm-afk-launch.sh start-native runs in firstmate's OWN foreground pane,
+#     so $TMUX_PANE / $HERDR_PANE_ID are present and discover_supervisor_target
+#     resolves the real captain pane.
+#   - The daemon is exec'd LATER by bin/fm-afk-start.sh THROUGH the harness's
+#     native background tool, which runs detached with none of those pane markers
+#     in its env, so its own discover_supervisor_target would silently fall back
+#     to firstmate:0 (the 2026-07-21 wedge: escalations aimed at the wrong pane
+#     for ~10.8h).
+# The terminal-backed path avoids this by passing FM_SUPERVISOR_TARGET on the
+# daemon command line; the native path cannot (no command line to inject env
+# into), so the foreground launcher persists the resolved target/backend here and
+# the background daemon entry loads it into FM_SUPERVISOR_TARGET/
+# FM_SUPERVISOR_BACKEND before exec. Same resolution, two-process handoff.
+FM_SUPERVISOR_TARGET_RECORD_NAME=".afk-supervisor-target"
+
+# fm_supervisor_target_persist <state-dir>: resolve the captain pane in THIS
+# process's env and, ONLY when it resolves cleanly (not the firstmate:0
+# fallback), write "<backend>\t<target>" atomically to the record. A fallback
+# result (discover returns non-zero) is deliberately NOT persisted, so the daemon
+# keeps its own discovery-plus-warning path for a genuinely-undiscoverable pane
+# instead of inheriting a bogus firstmate:0. Returns 0 when a real target was
+# persisted, non-zero otherwise (caller treats that as "nothing to hand off").
+fm_supervisor_target_persist() {  # <state-dir>
+  local state=$1 target backend pending
+  target=$(discover_supervisor_target) || return 1
+  backend=$(discover_supervisor_backend) || return 1
+  [ -n "$target" ] && [ -n "$backend" ] || return 1
+  mkdir -p "$state" || return 1
+  pending="$state/$FM_SUPERVISOR_TARGET_RECORD_NAME.pending.$$"
+  printf '%s\t%s\n' "$backend" "$target" > "$pending" || { rm -f "$pending"; return 1; }
+  mv "$pending" "$state/$FM_SUPERVISOR_TARGET_RECORD_NAME" || { rm -f "$pending"; return 1; }
+}
+
+# fm_supervisor_target_load_into_env <state-dir>: if FM_SUPERVISOR_TARGET is not
+# already set and a well-formed record exists, export FM_SUPERVISOR_TARGET/
+# FM_SUPERVISOR_BACKEND from it. Returns 0 when it loaded a target, non-zero when
+# there was nothing valid to load (env left untouched so the caller's own
+# discovery/fallback still runs). An explicit FM_SUPERVISOR_TARGET always wins, so
+# the terminal-backed path's command-line env is never overridden.
+fm_supervisor_target_load_into_env() {  # <state-dir>
+  local state=$1 record backend target
+  [ -z "${FM_SUPERVISOR_TARGET:-}" ] || return 1
+  record="$state/$FM_SUPERVISOR_TARGET_RECORD_NAME"
+  [ -f "$record" ] || return 1
+  IFS=$'\t' read -r backend target < "$record" || return 1
+  [ -n "$backend" ] && [ -n "$target" ] || return 1
+  case "$backend" in
+    tmux|herdr) ;;
+    *) return 1 ;;
+  esac
+  export FM_SUPERVISOR_TARGET="$target"
+  export FM_SUPERVISOR_BACKEND="$backend"
+}
