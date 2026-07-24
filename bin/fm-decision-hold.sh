@@ -37,6 +37,10 @@
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
+#
+# This file is an executable entrypoint, not a sourced library. The subcommand
+# dispatch runs only on a direct run; loading the file while carrying a subcommand
+# refuses with a non-zero exit rather than returning success without running it.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
