@@ -100,6 +100,27 @@
 #     therefore always resolves the owning tab id and calls
 #     `close-tab-by-id`, which verified cleanly removes a live tab (pane and
 #     all) in one call - never a separate close-pane first.
+#   - A stopped-but-resurrectable session lists as
+#     "<name> ... (EXITED - attach to resurrect)" and is DEAD for our
+#     purposes, but `list-sessions --short` collapses it to a bare name
+#     indistinguishable from a live one - so it was wrongly counted alive and
+#     server_ensure never rebuilt it. session_exists now parses the FULL
+#     `--no-formatting` listing and drops EXITED lines
+#     (fm_backend_zellij_live_sessions). server_ensure rebuilds a dead session
+#     by letting `attach -b` RESURRECT it (never delete-session first, which
+#     would discard an operator's serialized state on the shared default
+#     name); resurrection silently ignores a new tab's --cwd, so create_task
+#     guarantees the worktree cwd itself via fm_backend_zellij_ensure_pane_cwd
+#     - see docs/zellij-backend.md "Dead-session detection".
+#   - A tab-bar/status plugin APPENDS dynamic status glyphs to the rendered
+#     tab name, so an exact `.name == want` equality fails against a live,
+#     healthy pane (breaking fm-send/fm-crew-state/fm-teardown lookups). Every
+#     `.name`-equality site routes through one shared jq predicate
+#     (FM_BACKEND_ZELLIJ_NAME_MATCH_JQ) that matches the title exactly OR as a
+#     prefix ended by a decoration boundary (any char outside the ASCII title
+#     charset [A-Za-z0-9_-]), so "fm-h-task1" never matches a decorated
+#     "fm-h-task10 *"; list_live strips a trailing decoration run off the
+#     plain label - see docs/zellij-backend.md "Tab-name decoration".
 #
 # Requires: zellij (CLI), jq (JSON parsing). Bootstrap detects these through
 # fm_backend_required_tools only when zellij is the resolved backend; this
