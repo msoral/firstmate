@@ -373,7 +373,7 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
 fm_backend_zellij_pane_cwd() {  # <session> <pane_id>
   local session=$1 pane_id=$2
   fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null \
-    | jq -r --argjson p "$pane_id" '.[]? | select(.id == $p and .is_plugin == false) | .pane_cwd' 2>/dev/null | head -1
+    | jq -r --argjson p "$pane_id" '.[]? | select(.id == $p and .is_plugin == false) | .pane_cwd | strings' 2>/dev/null | head -1
 }
 
 # fm_backend_zellij_ensure_pane_cwd: guarantee terminal pane <pane_id> in
@@ -394,10 +394,16 @@ fm_backend_zellij_pane_cwd() {  # <session> <pane_id>
 # and every attempt submits a complete `cd` line, so the shell is back at a
 # clean prompt before the next one.
 fm_backend_zellij_ensure_pane_cwd() {  # <session> <pane_id> <want_cwd>
-  local session=$1 pane_id=$2 want=$3 i got escaped
+  local session=$1 pane_id=$2 want=$3 i got escaped want_resolved
+  # pane_cwd is the pane process's PHYSICAL (symlink-resolved) cwd, while `want`
+  # arrives as the LOGICAL path (fm-spawn computes it with `cd ... && pwd`).
+  # Resolve `want` once so a symlinked path component does not defeat the match;
+  # if the dir does not exist (e.g. a unit-test fixture) keep the literal want.
+  want_resolved=$(cd "$want" 2>/dev/null && pwd -P) || want_resolved=$want
+  [ -n "$want_resolved" ] || want_resolved=$want
   for i in $(seq 1 10); do
     got=$(fm_backend_zellij_pane_cwd "$session" "$pane_id")
-    [ "$got" = "$want" ] && return 0
+    { [ "$got" = "$want" ] || [ "$got" = "$want_resolved" ]; } && return 0
     [ -n "$got" ] && break   # populated but wrong (resurrected session ignored --cwd)
     sleep 0.3
   done
@@ -409,7 +415,7 @@ fm_backend_zellij_ensure_pane_cwd() {  # <session> <pane_id> <want_cwd>
     fm_backend_zellij_cli "$session" action send-keys --pane-id "$pane_id" Enter >/dev/null 2>&1
     sleep 0.4
     got=$(fm_backend_zellij_pane_cwd "$session" "$pane_id")
-    [ "$got" = "$want" ] && return 0
+    { [ "$got" = "$want" ] || [ "$got" = "$want_resolved" ]; } && return 0
   done
   echo "error: could not establish cwd '$want' for zellij pane $pane_id in session '$session'" >&2
   return 1

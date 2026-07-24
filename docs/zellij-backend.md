@@ -225,6 +225,8 @@ The fix has two parts:
    Deleting would be simpler (a resurrected session, unlike a fresh one, ignores `new-tab --cwd`), but it irreversibly discards an operator's serialized session state (tab layout, scrollback, restore info) on what is by default the *shared* `firstmate` session name, so it was rejected as too destructive on a shared resource.
    The `--cwd`-ignored consequence is handled where it belongs instead: `create_task` guarantees the worktree cwd itself via `fm_backend_zellij_ensure_pane_cwd`, which reads the new pane's `pane_cwd` (reliable for a brand-new top-level shell) and, only if it does not already match, establishes it with an explicit `cd` and re-verifies.
    That makes the cwd correct regardless of *who* resurrected the session (firstmate via `attach -b`, or an operator by hand), and it fails loudly rather than handing back a tab in the wrong directory.
+   The match tolerates symlinked paths: `pane_cwd` reports the pane process's *physical* (symlink-resolved) cwd while the requested cwd arrives *logical* (fm-spawn computes it with `cd ... && pwd`), so `ensure_pane_cwd` resolves the requested path with `pwd -P` and accepts the pane when its `pane_cwd` equals *either* the logical or the physical form.
+   Without this, a symlinked path component (a symlinked `FM_HOME`/`$HOME`, `/tmp -> /private/tmp` on macOS) would make byte-exact equality never match and refuse every spawn.
 
 Resurrection's other consequence - it also restores this home's stale task tabs - is a documented known gap, not silent corruption; see "Known gaps".
 
