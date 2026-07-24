@@ -1558,6 +1558,22 @@ test_verify_once_skips_when_afk_inactive() {
   pass "verify-once: skipped when afk is inactive (no captain to protect yet)"
 }
 
+test_verify_once_misconfigured_tries_degrade_to_skip() {
+  local dir state val rc
+  dir=$(make_supercase verify-once-badtries); state="$dir/state"; : > "$state/.afk"
+  # A zero, negative, or non-numeric window must SKIP, never false-alarm a pane it
+  # never probed (a zero-iteration loop would report "target never resolved").
+  for val in 0 -1 abc; do
+    rc=0
+    ( fm_backend_target_exists() { return 1; }; pane_is_busy() { return 1; }
+      fm_backend_composer_state() { echo unknown; }
+      FM_VERIFY_ONCE_TRIES="$val" FM_VERIFY_ONCE_SLEEP=0.01 verify_once_injectable "$state" "%TGT" tmux ) || rc=$?
+    [ "$rc" -eq 0 ] || fail "verify-once should skip (rc=0) for FM_VERIFY_ONCE_TRIES='$val' (rc=$rc)"
+    [ ! -e "$state/.subsuper-inject-wedged" ] || fail "verify-once false-alarmed for misconfigured FM_VERIFY_ONCE_TRIES='$val'"
+  done
+  pass "verify-once: a zero/negative/non-numeric tries window degrades to skip, no false alarm"
+}
+
 test_fm_send_exits_nonzero_on_confirmed_swallow() {
   # fm-send.sh must exit NON-ZERO when a steer's Enter is positively swallowed
   # (text left in the composer), so firstmate learns the instruction did not land
@@ -1879,6 +1895,7 @@ test_verify_once_alarms_on_idle_unreadable_composer
 test_verify_once_alarms_when_target_never_resolves
 test_verify_once_inconclusive_on_persistent_busy
 test_verify_once_skips_when_afk_inactive
+test_verify_once_misconfigured_tries_degrade_to_skip
 test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_discover_supervisor_backend_precedence

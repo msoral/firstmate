@@ -20,8 +20,11 @@
 # This is the COMMON daemon entry for every backend. HOW it becomes a tracked
 # background process differs by harness/backend and is owned elsewhere:
 #   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
-#     run this directly via that tool, so the daemon inherits the captain pane's
-#     env and auto-discovers it.
+#     run this directly via that tool. That tool runs DETACHED, without the
+#     captain pane's TMUX_PANE/HERDR_PANE_ID in its env, so the daemon cannot
+#     rediscover the pane; this entry loads the pane the foreground launcher
+#     persisted (fm_supervisor_target_load_into_env) before exec. The handoff is
+#     required, not redundant - see docs/afk-inject-delivery.md.
 #   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
 #     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
 #     backend (herdr tab/workspace, tmux detached session) and passes the
@@ -47,6 +50,19 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_AFK_START_DIR/fm-supervisor-target-lib.sh"
 
+# The single list of session-scoped away-mode delivery artifacts: transient
+# delivery caches and the native supervisor-target handoff record, all owned by
+# the current away session and safe to clear on a fresh entry and to
+# snapshot/restore transactionally. bin/fm-afk-launch.sh sources this file and
+# reuses the same list for its backup, restore, and clear paths, so the clear
+# list and the rollback list can never drift apart.
+FM_AFK_SESSION_ARTIFACTS=(
+  .subsuper-escalations
+  .subsuper-escalations.since
+  .subsuper-inject-wedged
+  "$FM_SUPERVISOR_TARGET_RECORD_NAME"
+)
+
 fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -65,15 +81,15 @@ fm_afk_start_usage() {
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
-  local state=$1
-  # The native supervisor-target handoff record is session-scoped too: a fresh
-  # entry must not inherit a prior session's captain pane. Cleared BEFORE
-  # fm_afk_launch.sh persists the new one, so a fresh entry that cannot resolve a
-  # pane leaves no stale target behind (the daemon then discovers/warns instead).
-  rm -f "$state/.subsuper-escalations" \
-        "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" \
-        "$state/$FM_SUPERVISOR_TARGET_RECORD_NAME" 2>/dev/null
+  local state=$1 artifact
+  # Clears every session-scoped artifact, including the native supervisor-target
+  # handoff record: a fresh entry must not inherit a prior session's captain pane.
+  # The handoff record is cleared BEFORE fm-afk-launch.sh persists the new one, so
+  # a fresh entry that cannot resolve a pane leaves no stale target behind (the
+  # daemon then discovers/warns instead).
+  for artifact in "${FM_AFK_SESSION_ARTIFACTS[@]}"; do
+    rm -f "$state/$artifact" 2>/dev/null
+  done
 }
 
 daemon_lock_owner() {

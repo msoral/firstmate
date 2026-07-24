@@ -978,6 +978,13 @@ verify_once_injectable() {  # <state> <target> <backend>
     log "verify-once: skipped (FM_VERIFY_ONCE_SKIP=1)"
     return 0
   fi
+  # A misconfigured window (zero, negative, or non-numeric tries) must degrade to
+  # SKIP, never to a false alarm: a zero-iteration loop would leave saw_target=0
+  # and report "target never resolved" for a pane it never probed.
+  case $tries in
+    ''|*[!0-9]*) log "verify-once: skipped (FM_VERIFY_ONCE_TRIES='$tries' is not a positive integer)"; return 0 ;;
+  esac
+  [ "$tries" -ge 1 ] || { log "verify-once: skipped (FM_VERIFY_ONCE_TRIES=$tries < 1)"; return 0; }
   for ((i = 1; i <= tries; i++)); do
     if ! fm_backend_target_exists "$backend" "$target"; then
       log "verify-once: supervisor target '$target' not found (try $i/$tries)"
@@ -1489,17 +1496,13 @@ fm_super_main() {
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
 
-  # --- verify-before-trust: prove one delivery is possible at entry ----------
-  # Before the captain relies on this daemon overnight, confirm the resolved pane
-  # is actually injectable (or alarm loudly now). This is the guard that turns a
-  # wrong-target or unreadable-composer failure from a multi-hour blind wedge into
-  # a within-seconds alert. It never aborts startup: the daemon still runs so the
-  # durable buffer, wake-queue replay, and max-defer net all remain in force.
-  verify_once_injectable "$STATE" "$TARGET" "$BACKEND" || true
-
-  migrate_watcher_pause_markers "$STATE"
-
   # --- shutdown: flush buffered escalations, reap child, release lock -------
+  # Installed BEFORE the verify-before-trust probe below: that probe can block for
+  # up to FM_VERIFY_ONCE_TRIES * FM_VERIFY_ONCE_SLEEP (~20s), and the common way it
+  # ends early is the captain returning immediately, which runs fm-afk-launch.sh
+  # stop and SIGTERMs the daemon mid-probe. Trapping first keeps that window under
+  # the same flush/lock-release/pidfile cleanup as the rest of the daemon's life,
+  # instead of the default SIGTERM action leaving a stale lock and pidfile.
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
     trap - TERM INT
@@ -1518,6 +1521,16 @@ fm_super_main() {
     exit 0
   }
   trap cleanup TERM INT
+
+  # --- verify-before-trust: prove one delivery is possible at entry ----------
+  # Before the captain relies on this daemon overnight, confirm the resolved pane
+  # is actually injectable (or alarm loudly now). This is the guard that turns a
+  # wrong-target or unreadable-composer failure from a multi-hour blind wedge into
+  # a within-seconds alert. It never aborts startup: the daemon still runs so the
+  # durable buffer, wake-queue replay, and max-defer net all remain in force.
+  verify_once_injectable "$STATE" "$TARGET" "$BACKEND" || true
+
+  migrate_watcher_pause_markers "$STATE"
 
   # --- crash-loop guard -----------------------------------------------------
   local crash_times=() backoff_secs=$CRASH_NORMAL_SLEEP

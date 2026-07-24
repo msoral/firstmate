@@ -27,7 +27,8 @@ The durable marker and the tmux flash are unchanged; the active alert is added a
 
 An absent `config/wedge-alarm` behaves as `auto`, i.e. default-on on macOS.
 Default-on is deliberate: the alarm's entire purpose is that a wedged away-mode primary is never silent, so the reachable OS channel fires unless the captain explicitly disables it.
-The alarm is rate-limited to at most once per max-defer window, and fires only after a genuine wedge past max-defer, so the default-on banner is rare and never chatty.
+The alarm is rate-limited to at most once per max-defer window, and its usual trigger is a genuine wedge past max-defer, so the default-on banner is rare and never chatty.
+It has one earlier trigger: the verify-before-trust startup self-check raises the same channels and writes the same `state/.subsuper-inject-wedged` marker within seconds of away-mode entry when the resolved supervisor pane proves not injectable, before any escalation has been deferred (`docs/afk-inject-delivery.md` owns those verdict rules).
 
 Each channel is best-effort: a missing binary or a non-zero exit logs a warning and the alarm falls through to the next channel, never crashing the daemon loop.
 Every invocation is also process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS` (10 seconds by default), including `command:`, `osascript`, `herdr`, and an `FM_WEDGE_ALARM_EXEC` override.
